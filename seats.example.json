@@ -1,0 +1,14 @@
+{
+  "$comment": "如需自定义模型名、增删席位或指定默认模型，复制本文件到 ~/.live-roundtable/seats.json 后按需修改。",
+  "seats": {
+    "opus": {
+      "model": "claude-opus-5-5",
+      "label": "Opus 5.5"
+    },
+    "fable": {
+      "model": "",
+      "label": "Fable（用账号默认）"
+    },
+    "gemini": false
+  }
+}

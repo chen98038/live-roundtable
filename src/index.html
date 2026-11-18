@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>实时圆桌</title>
+<script src="/vendor/marked.min.js"></script>
+<style>
+/* 布局：左边是讨论列表，中间是对话，设置收在对话顶上；席位颜色由 /api/meta 动态注入 */
+:root {
+  --bg: #f4f5f2; --panel: #ffffff; --ink: #1b1f1d; --muted: #66706b; --line: #d9ddd6; --soft: #eceee9;
+  --accent: #2f5d50;
+  --research: #0e7490; --summary: #6b5b95; --helper: #9a6700; --user: #1b1f1d;
+  --err: #b42318; --errbg: #fdecea;
+  --warn: #9a6700; --warnbg: #fef7e0;
+  --display: "Noto Serif SC", "Songti SC", "STSong", "SimSun", Georgia, serif;
+  --body: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #121514; --panel: #1a1e1c; --ink: #e5e9e6; --muted: #98a29d; --line: #2c3330; --soft: #222825;
+  --accent: #8cc7b4; --research: #4cc3dc; --summary: #b8a6e6; --helper: #e3b341; --user: #e5e9e6;
+  --err: #ff8a80; --errbg: #3a1d1b; --warn: #f0c05a; --warnbg: #322a14; color-scheme: dark; } }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.7 var(--body); }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.app { display: grid; grid-template-columns: 250px 1fr; height: 100%; }
+aside { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--soft); }
+aside header { padding: 16px; display: grid; gap: 10px; }
+aside h1 { font: 600 20px var(--display); margin: 0; }
+.new { border: 1px solid var(--accent); color: var(--accent); background: var(--panel); border-radius: 6px; padding: 6px 10px; }
+.convs { overflow-y: auto; padding: 0 8px 16px; display: grid; gap: 2px; align-content: start; }
+.conv { text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 8px 10px; display: grid; gap: 2px; }
+.conv:hover { background: var(--panel); }
+.conv.on { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
+.conv .t { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv .d { font-size: 12px; color: var(--muted); }
+
+main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.top { border-bottom: 1px solid var(--line); padding: 10px 20px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; background: var(--panel); }
+.top .title { font: 600 16px var(--display); flex: 1 1 200px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seatpick { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 13px; background: var(--panel); user-select: none; cursor: pointer; }
+.pill.off { opacity: .45; cursor: not-allowed; }
+.pill input { margin: 0; accent-color: var(--c, var(--accent)); }
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--accent)); }
+.opts { display: flex; gap: 12px; align-items: center; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+.opts label { display: inline-flex; gap: 5px; align-items: center; }
+.opts select { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 1px 4px; }
+.link { border: 0; background: none; color: var(--accent); font-size: 13px; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
+.more { border-bottom: 1px solid var(--line); padding: 12px 20px; display: grid; gap: 10px; background: var(--soft); }
+.more textarea, .more input { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: var(--panel); font-size: 14px; }
+.more .row { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; align-items: center; font-size: 13px; }
+.more .row select { border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; background: var(--panel); font-size: 13px; }
+.more .hint { font-size: 12px; color: var(--muted); }
+
+.log { flex: 1; overflow-y: auto; padding: 20px; display: grid; gap: 18px; align-content: start; }
+.empty { color: var(--muted); max-width: 62ch; margin: 36px auto; display: grid; gap: 10px; font-size: 14px; }
+.empty h2 { font: 600 22px var(--display); color: var(--ink); margin: 0; }
+.warnbox { background: var(--warnbg); border: 1px solid var(--warn); color: var(--ink); border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; }
+.warnbox b { color: var(--warn); }
+.warnbox ul { margin: 0; padding-left: 1.3em; }
+.msg { max-width: 860px; width: 100%; margin: 0 auto; display: grid; gap: 4px; }
+.msg .who { font-size: 13px; font-weight: 700; color: var(--c); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.msg .who .meta { font-weight: 400; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.msg .body { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--c); border-radius: 6px; padding: 10px 14px; min-width: 0; overflow-wrap: anywhere; }
+.msg.user .body { background: var(--soft); border-left-color: var(--user); }
+.msg.research .body { max-height: 420px; overflow-y: auto; }
+.msg .body > :first-child { margin-top: 0; } .msg .body > :last-child { margin-bottom: 0; }
+.msg .body p { margin: 0 0 .6em; } .msg .body ul, .msg .body ol { margin: 0 0 .6em; padding-left: 1.4em; }
+.msg .body h1, .msg .body h2, .msg .body h3 { font-size: 15px; margin: .8em 0 .3em; }
+.msg .body table { border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; }
+.msg .body th, .msg .body td { border: 1px solid var(--line); padding: 3px 6px; }
+.msg .body code { font-family: var(--mono); font-size: 12.5px; }
+.msg .body a { color: var(--accent); }
+.copy { font: inherit; font-size: 12px; font-weight: 400; color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.copy:hover { color: var(--c); border-color: var(--c); }
+.msg .who .copy { margin-left: auto; }
+.msg .foot { display: flex; justify-content: flex-end; }
+.status { font-size: 12.5px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--c); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+details.process { max-width: 860px; width: 100%; margin: 0 auto; border: 1px dashed var(--line); border-radius: 6px; padding: 6px 12px; }
+details.process > summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+details.process[open] { display: grid; gap: 18px; padding-bottom: 12px; }
+.msg.summary .body { background: var(--soft); }
+.msg.moderator .body { background: var(--soft); font-size: 14px; }
+.next { max-width: 860px; width: 100%; margin: -8px auto 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+.next .nq { display: grid; gap: 2px; text-align: left; flex: 1 1 260px; border-color: var(--summary); }
+.next .nq b { font-size: 13px; color: var(--summary); }
+.next .nq span { font-size: 13.5px; }
+.err { color: var(--err); background: var(--errbg); border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+details.src { font-size: 12.5px; color: var(--muted); }
+details.src ul { margin: 4px 0 0; padding-left: 1.2em; }
+details.src a { color: var(--muted); overflow-wrap: anywhere; }
+
+.composer { border-top: 1px solid var(--line); padding: 12px 20px 16px; background: var(--panel); display: grid; gap: 8px; }
+.composer textarea { width: 100%; max-width: 860px; margin: 0 auto; display: block; min-height: 64px; max-height: 40vh; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
+.actions { max-width: 860px; width: 100%; margin: 0 auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.btn { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 5px 12px; font-size: 14px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.stop { border-color: var(--err); color: var(--err); }
+.btn.rank { border-color: var(--summary); color: var(--summary); }
+.actions .hint { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
+  .log, .top, .composer, .more { padding-left: 12px; padding-right: 12px; }
+  .actions .hint { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <header><h1>实时圆桌</h1><button class="new" id="new">＋ 新讨论</button></header>
+    <nav class="convs" id="convs" aria-label="讨论列表"></nav>
+  </aside>
+  <main>
+    <div class="top">
+      <div class="title" id="title">新讨论</div>
+      <div class="seatpick" id="seatpick"></div>
+      <div class="opts">
+        <label><input type="checkbox" id="web"> 上网</label>
+        <label title="GPT：codex priority；Claude：claude -p 需账号开了额外用量才生效，未开自动用标准速度"><input type="checkbox" id="fast"> fast</label>
+        <label>思考 <select id="effort"><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+        <label title="你发问后，大家自动看彼此的发言互相回应几轮">自动讨论 <select id="rounds"><option value="0">0 轮</option><option value="1">1 轮</option><option value="2">2 轮</option><option value="3">3 轮</option></select></label>
+        <label title="讨论完自动让主持人总结，过程折叠起来"><input type="checkbox" id="autoSummary"> 自动总结</label>
+        <button class="link" id="toggleMore" aria-expanded="false">背景、角色和思考</button>
+      </div>
+    </div>
+    <div class="more" id="more" hidden>
+      <div class="row"><span>背景</span><textarea id="background" rows="3" placeholder="可选：每位参与者都会看到，比如你的约束、目标、已经定下的事"></textarea></div>
+      <div class="row"><span>主持人</span><select id="moderator"><option value="">自动（优先已勾选席位）</option></select><span></span></div>
+      <div id="personas"></div>
+      <div class="hint">角色留空 = 以模型本身的身份发言。思考选「跟随顶栏」就用顶栏的强度；主持人总结用所选主持人那一档。改动自动保存，从下一轮起生效。</div>
+    </div>
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="composer">
+      <textarea id="input" placeholder="说点什么。⌘ + Enter 发送"></textarea>
+      <div class="actions">
+        <button class="btn primary" id="send">发送</button>
+        <button class="btn" id="respond" title="每位看完别人刚才的发言后回应">互相回应</button>
+        <button class="btn" id="summary" title="由主持人整理共识、分歧、待你决定的问题">主持人总结</button>
+        <button class="btn" id="research" title="把输入框里的问题交给 GPT Researcher 调研，报告放进讨论给大家看">先调研</button>
+        <button class="btn rank" data-special="rank" title="找秩：主持人先把这件事下面的具体问题列成清单，各位找出最少几个独立的基本问题，再互相找反例和冗余。输入框空着时点它先填入模板，填好再点一次">找秩</button>
+        <button class="btn rank" data-special="book" title="三把尺读书：主持人先把书的观点列成清单，各位用贝叶斯、奥卡姆剃刀、万有理论重新梳理。输入框空着时点它先填入模板，填好再点一次">三把尺读书</button>
+        <button class="btn stop" id="stop" hidden>停止</button>
+        <span class="hint" id="cost"></span>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// 模型输出里的原始 HTML 一律转义；链接新标签打开
+marked.use({ renderer: {
+  html(t) { return esc(typeof t === 'string' ? t : t.text); },
+  link(href, title, text) { return `<a href="${esc(href)}" target="_blank" rel="noopener">${text}</a>`; },
+} });
+const md = s => marked.parse(String(s ?? ''));
+
+let META, conv = null, busy = false;
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const safeId = id => String(id ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+const seatVar = id => `var(--seat-${safeId(id)}, var(--accent))`;
+const kindOf = m => m.kind ?? (m.rank ? 'rank' : null);
+
+function label(m) {
+  if (m.role === 'user') return kindOf(m) ? `你 · ${META.special[kindOf(m)].label}` : '你';
+  if (m.role === 'research') return '调研员 · GPT Researcher';
+  if (m.role === 'helper') return '调研助手';
+  const seatLabel = m.seat ? (META.seats[m.seat]?.label ?? m.seat) : '';
+  const suffix = seatLabel ? ` · ${seatLabel}` : '';
+  if (m.mode === 'inventory') return `主持人 · ${m.kind === 'book' ? '观点清单' : '问题清单'}${suffix}`;
+  if (m.role === 'summary') return `主持人总结${suffix}`;
+  if (m.role === 'moderator') return `主持人${suffix}`;
+  return seatLabel || m.seat || '参与者';
+}
+
+function color(m) {
+  if (m.role === 'user') return 'var(--user)';
+  if (m.role === 'research') return 'var(--research)';
+  if (m.role === 'helper') return 'var(--helper)';
+  if (m.role === 'summary' || m.role === 'moderator') return 'var(--summary)';
+  return seatVar(m.seat);
+}
+
+function applySeatStyles() {
+  const rules = Object.entries(META.seats).map(([id, s]) => {
+    const key = safeId(id);
+    const c = s.color || '#2f5d50';
+    const dc = s.darkColor || c;
+    return `:root { --seat-${key}: ${c}; } @media (prefers-color-scheme: dark) { :root { --seat-${key}: ${dc}; } }`;
+  }).join('\n');
+  let style = document.getElementById('seat-colors');
+  if (!style) {
+    style = document.createElement('style');
+    style.id = 'seat-colors';
+    document.head.appendChild(style);
+  }
+  style.textContent = rules;
+}
+
+function updateComposerPlaceholder() {
+  const avail = Object.entries(META.seats).filter(([, s]) => s.available).map(([id]) => `@${id}`);
+  $('input').placeholder = avail.length
+    ? `说点什么。开头写 ${avail.join(' / ')} 只让这几位回答。⌘ + Enter 发送`
+    : '未检测到可用的本地模型 CLI，请先安装并登录 claude / codex / agy，或运行 --doctor 查看检测结果';
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { 'content-type': 'application/json' }, ...opts, body: opts.body && JSON.stringify(opts.body) });
+  const j = await r.json(); if (!r.ok) throw new Error(j.error ?? r.status); return j;
+}
+
+const when = iso => { if (!iso) return ''; const d = new Date(iso), p = n => String(n).padStart(2, '0'); return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+async function listConvs() {
+  const list = await api('/api/convs');
+  $('convs').innerHTML = list.map(c => `<button class="conv ${conv?.id === c.id ? 'on' : ''}" data-id="${esc(c.id)}"><span class="t">${esc(c.title)}</span><span class="d">${esc(when(c.updated))} · ${c.n} 条</span></button>`).join('')
+    || '<div class="conv"><span class="d">还没有讨论</span></div>';
+  return list;
+}
+$('convs').addEventListener('click', e => { const b = e.target.closest('[data-id]'); if (b && !busy) open(b.dataset.id); });
+
+async function open(id) {
+  conv = await api(`/api/convs/${id}`);
+  try { localStorage.setItem('live-rt.last', id); } catch {}
+  renderSettings(); renderLog(); listConvs(); subscribe(id);
+}
+async function create() {
+  const prev = conv?.settings;
+  conv = await api('/api/convs', {
+    method: 'POST',
+    body: {
+      settings: prev ? {
+        seats: prev.seats.filter(id => META.seats[id]?.available),
+        web: prev.web,
+        fast: prev.fast,
+        rounds: prev.rounds,
+        autoSummary: prev.autoSummary,
+        moderator: prev.moderator ?? '',
+      } : {},
+    },
+  });
+  renderSettings(); renderLog(); listConvs(); subscribe(conv.id); $('input').focus();
+}
+$('new').onclick = () => !busy && create();
+
+function renderSettings() {
+  const s = conv.settings;
+  $('title').textContent = conv.title;
+  $('seatpick').innerHTML = Object.entries(META.seats).map(([id, x]) => {
+    const checked = x.available && s.seats.includes(id);
+    const titleAttr = x.available ? '' : ` title="${esc(x.hint || '未检测到对应 CLI')}"`;
+    return `<label class="pill ${x.available ? '' : 'off'}" style="--c:${seatVar(id)}"${titleAttr}><input type="checkbox" data-seat="${esc(id)}" ${checked ? 'checked' : ''} ${x.available ? '' : 'disabled'}><span class="dot"></span>${esc(x.label)}</label>`;
+  }).join('');
+  $('web').checked = s.web;
+  $('fast').checked = s.fast;
+  $('effort').value = s.effort;
+  $('rounds').value = String(s.rounds ?? META.defaults.rounds);
+  $('autoSummary').checked = s.autoSummary ?? META.defaults.autoSummary;
+  $('background').value = s.background ?? '';
+
+  const modOpts = ['<option value="">自动（优先已勾选席位）</option>'];
+  for (const [id, x] of Object.entries(META.seats)) {
+    if (x.available) modOpts.push(`<option value="${esc(id)}">${esc(x.label)}</option>`);
+  }
+  const curMod = s.moderator ?? '';
+  if (curMod && !META.seats[curMod]?.available) {
+    modOpts.push(`<option value="${esc(curMod)}">${esc(META.seats[curMod]?.label ?? curMod)}（当前不可用）</option>`);
+  }
+  $('moderator').innerHTML = modOpts.join('');
+  $('moderator').value = curMod;
+
+  $('personas').innerHTML = Object.entries(META.seats).map(([id, x]) => `<div class="row"><span>${esc(x.label)} 的角色</span><input data-persona="${esc(id)}" value="${esc(s.personas?.[id] ?? '')}" placeholder="可选，比如「唱反调，专挑风险」"><select data-effort="${esc(id)}" aria-label="${esc(x.label)} 的思考强度">${['', ...EFFORTS].map(e => `<option value="${e}" ${(s.efforts?.[id] ?? '') === e ? 'selected' : ''}>${e ? '思考 ' + e : '跟随顶栏'}</option>`).join('')}</select></div>`).join('');
+  updateCost();
+}
+let saveTimer;
+function saveSettings() {
+  const seats = [...document.querySelectorAll('[data-seat]')].filter(x => !x.disabled && x.checked).map(x => x.dataset.seat);
+  const personas = Object.fromEntries([...document.querySelectorAll('[data-persona]')].map(x => [x.dataset.persona, x.value]));
+  const efforts = Object.fromEntries([...document.querySelectorAll('[data-effort]')].filter(x => x.value).map(x => [x.dataset.effort, x.value]));
+  Object.assign(conv.settings, {
+    seats,
+    web: $('web').checked,
+    fast: $('fast').checked,
+    effort: $('effort').value,
+    efforts,
+    rounds: +$('rounds').value,
+    autoSummary: $('autoSummary').checked,
+    moderator: $('moderator').value,
+    background: $('background').value,
+    personas,
+  });
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => api(`/api/convs/${conv.id}/settings`, { method: 'POST', body: conv.settings }), 400);
+}
+document.querySelector('.top').addEventListener('change', saveSettings);
+$('more').addEventListener('input', saveSettings);
+$('more').addEventListener('change', saveSettings);
+$('toggleMore').onclick = () => { const m = $('more'); m.hidden = !m.hidden; $('toggleMore').setAttribute('aria-expanded', String(!m.hidden)); };
+
+function metaLine(m) {
+  const bits = [];
+  if (m.mode === 'inventory') bits.push('只列不答');
+  else if (m.role === 'moderator') bits.push(m.round ? `第 ${m.round} 轮的问题` : '这轮的问题');
+  else if (m.round) bits.push(`第 ${m.round} 轮回应`);
+  else if (m.mode === 'respond') bits.push('回应');
+  if (m.effort) bits.push(`思考 ${m.effort}`);
+  if (m.speed) bits.push(m.speed);
+  if (m.ms) bits.push(`${(m.ms / 1000).toFixed(1)} 秒`);
+  if (m.searches?.length) bits.push(`搜索 ${m.searches.length} 次`);
+  if (m.usd) bits.push(`$${m.usd.toFixed(3)}`);
+  return bits.join(' · ');
+}
+function msgHTML(m) {
+  const sources = m.sources?.length ? `<details class="src"><summary>来源 ${m.sources.length}</summary><ul>${m.sources.map(s => `<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></li>`).join('')}</ul></details>` : '';
+  const pending = m.pending ? `<div class="status"><span class="spin"></span><span class="st">${m.role === 'research' ? '调研中，约 2 分钟' : '思考中'}</span><span class="tm" data-since="${m.at ? Date.parse(m.at) : Date.now()}"></span></div>` : '';
+  const copy = `<button class="copy" data-copy="${m.id}" title="复制这条发言的原文">复制</button>`;
+  return `<div class="msg ${m.role}" id="m-${m.id}" style="--c:${color(m)}">
+    <div class="who">${esc(label(m))}<span class="meta">${esc(metaLine(m))}</span>${copy}</div>
+    ${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}
+    ${m.text || !m.pending ? `<div class="body">${m.role === 'user' ? esc(m.text).replace(/\n/g, '<br>') : md(m.text)}</div>` : '<div class="body" hidden></div>'}
+    ${pending}${sources}<div class="foot">${copy}</div></div>`;
+}
+const inRun = m => m?.role === 'seat' || m?.role === 'moderator';
+function logHTML(ms) {
+  const out = [];
+  for (let i = 0; i < ms.length; i++) {
+    if (!inRun(ms[i])) { out.push(msgHTML(ms[i])); continue; }
+    let j = i; while (j < ms.length && inRun(ms[j])) j++;
+    const run = ms.slice(i, j);
+    if (ms[j]?.role === 'summary') {
+      const said = run.filter(m => m.role === 'seat');
+      const rounds = Math.max(0, ...said.map(m => m.round ?? (m.mode === 'respond' ? 1 : 0)));
+      out.push(`<details class="process"><summary>讨论过程：${said.length} 条发言${rounds ? `，互相回应 ${rounds} 轮` : ''}</summary>${run.map(msgHTML).join('')}</details>`);
+    } else out.push(...run.map(msgHTML));
+    i = j - 1;
+  }
+  const last = ms.at(-1);
+  if (last?.role === 'summary' && !last.error) out.push(nextHTML(last.text));
+  return out.join('');
+}
+function section(text, name) {
+  const m = String(text ?? '').match(new RegExp(`^##\\s*${name}[^\\n]*\\n([\\s\\S]*?)(?=^##\\s|(?![\\s\\S]))`, 'm'));
+  const s = m?.[1].replace(/\*\*/g, '').replace(/^\s*[-*]\s+/, '').trim();
+  return s && !/^「?无」?[。.]?$/.test(s) ? s : '';
+}
+function nextHTML(text) {
+  const q = section(text, '下一层问题'), d = section(text, '深挖这处分歧');
+  if (!q && !d) return '';
+  return `<div class="next" id="next">
+    ${q ? `<button class="btn nq" data-ask="${esc(q)}"><b>接着问下一层</b><span>${esc(q)}</span></button>` : ''}
+    ${d ? `<button class="btn nq" data-ask="${esc(d)}"><b>深挖这处分歧</b><span>${esc(d)}</span></button>` : ''}
+    <button class="btn" data-more title="打开「背景、角色和思考」改某一位的角色，改好点「互相回应」">调整角色再议</button>
+  </div>`;
+}
+$('log').addEventListener('click', async e => {
+  const c = e.target.closest('.copy');
+  if (c) {
+    const id = c.dataset.copy;
+    const text = conv.messages.find(m => m.id === id)?.text || raw[id] || document.querySelector(`#m-${id} .body`)?.innerText || '';
+    try { await navigator.clipboard.writeText(text); }
+    catch { const t = document.createElement('textarea'); t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove(); }
+    document.querySelectorAll(`[data-copy="${id}"]`).forEach(x => { x.textContent = '已复制'; setTimeout(() => (x.textContent = '复制'), 1200); });
+    return;
+  }
+  const b = e.target.closest('.next button'); if (!b || busy) return;
+  if (b.dataset.ask) return turn('ask', b.dataset.ask);
+  $('more').hidden = false; $('toggleMore').setAttribute('aria-expanded', 'true'); document.querySelector('[data-persona]')?.focus();
+});
+function renderLog() {
+  if (conv.messages.length) {
+    $('log').innerHTML = logHTML(conv.messages);
+    scrollDown(true);
+    return;
+  }
+  const seats = Object.entries(META.seats);
+  const avail = seats.filter(([, s]) => s.available);
+  const missing = seats.filter(([, s]) => !s.available);
+  const missingWarn = !avail.length
+    ? `<div class="warnbox"><b>当前未检测到可用的模型 CLI</b><p>本工具通过你本机已登录的 CLI 工具并发调用模型，请先安装并登录以下任意工具后刷新页面：</p><ul>${missing.map(([, s]) => `<li>${esc(s.label)}：${esc(s.hint)}</li>`).join('')}</ul></div>`
+    : '';
+  const availNames = avail.map(([, s]) => s.label).join('、');
+  const researchLine = META.features?.research ? '需要先查资料时，也可以点「先调研」让 GPT Researcher 写一份带引用的报告放进讨论。' : '';
+  $('log').innerHTML = `<div class="empty">${missingWarn}<h2>想讨论什么？</h2>
+    <p>写下问题，顶栏勾选的席位会并行独立回答${avail.length ? `（当前可用：${esc(availNames)}）` : ''}。同一回合里各位彼此看不到发言，答完再一起展示。</p>
+    <p>之后可以接着追问，或用 @ 点名某一位；按顶栏「自动讨论」轮数，发问后大家会自动互相回应（每轮前主持人先抓出核心分歧定焦，无分歧则提前收束），最后由主持人总结，下方提供「接着问下一层」「深挖这处分歧」快捷追问，讨论过程默认折叠在总结之上。${esc(researchLine)}</p>
+    <p>两个特别模式，输入框空着时点按钮先填入模板，填好再点一次：「找秩」把一件事拆到最少几个彼此独立的基本问题；「三把尺读书」把一本书的观点列成清单，用贝叶斯、奥卡姆剃刀、万有理论重新梳理。</p></div>`;
+  scrollDown(true);
+}
+function scrollDown(force) { const l = $('log'); if (force || l.scrollHeight - l.scrollTop - l.clientHeight < 160) l.scrollTop = l.scrollHeight; }
+function updateCost() {
+  const usd = conv.messages.reduce((s, m) => s + (m.usd ?? 0), 0);
+  $('cost').textContent = usd ? `这场讨论的花费约 $${usd.toFixed(2)}（调研员；本地 CLI 订阅不计美元）` : '';
+}
+setInterval(() => document.querySelectorAll('.tm[data-since]').forEach(t => (t.textContent = `${Math.round((Date.now() - t.dataset.since) / 1000)} 秒`)), 500);
+
+let es = null;
+const raw = {};
+function subscribe(id) {
+  es?.close();
+  es = new EventSource(`/api/convs/${id}/events`);
+  es.onmessage = ev => { if (conv?.id === id) handle(JSON.parse(ev.data)); };
+}
+function handle(e) {
+  if (e.type === 'busy') {
+    setBusy(e.on);
+    if (!e.on) {
+      updateCost(); listConvs();
+      if (conv.messages.at(-1)?.role === 'summary') { renderLog(); document.getElementById(`m-${conv.messages.at(-1).id}`)?.scrollIntoView({ block: 'start' }); }
+    }
+  }
+  if (e.type === 'conv') { conv.title = e.conv.title; $('title').textContent = e.conv.title; }
+  if (e.type === 'start') { if (document.getElementById(`m-${e.msg.id}`)) return; raw[e.msg.id] = e.msg.text ?? ''; if (!conv.messages.length) $('log').innerHTML = ''; $('log').insertAdjacentHTML('beforeend', msgHTML(e.msg)); scrollDown(true); }
+  if (e.type === 'delta') {
+    raw[e.id] = (raw[e.id] ?? '') + e.text;
+    const b = document.querySelector(`#m-${e.id} .body`); if (!b) return;
+    b.hidden = false; b.innerHTML = md(raw[e.id]);
+    const st = document.querySelector(`#m-${e.id} .st`); if (st) st.textContent = '正在写';
+    scrollDown();
+  }
+  if (e.type === 'status') { const st = document.querySelector(`#m-${e.id} .st`); if (st) st.textContent = e.text; }
+  if (e.type === 'done') {
+    if (!conv.messages.length) $('log').innerHTML = '';
+    if (!conv.messages.some(m => m.id === e.msg.id)) conv.messages.push(e.msg);
+    const el = document.getElementById(`m-${e.msg.id}`);
+    if (el) el.outerHTML = msgHTML(e.msg); else $('log').insertAdjacentHTML('beforeend', msgHTML(e.msg));
+    scrollDown(e.msg.role !== 'seat');
+  }
+  if (e.type === 'error') $('log').insertAdjacentHTML('beforeend', `<div class="msg"><div class="err">${esc(e.text)}</div></div>`);
+}
+
+async function turn(mode, preset) {
+  if (busy) return;
+  const text = preset ?? $('input').value.trim();
+  const typed = mode === 'ask' || mode === 'research' || !!META.special[mode];
+  if (typed && !text) { $('input').focus(); return; }
+  if (!preset && typed) $('input').value = '';
+  setBusy(true);
+  try { await api(`/api/convs/${conv.id}/say`, { method: 'POST', body: { mode, text } }); }
+  catch (err) { $('log').insertAdjacentHTML('beforeend', `<div class="msg"><div class="err">${esc(err.message)}</div></div>`); setBusy(false); }
+}
+function setBusy(b) {
+  busy = b;
+  for (const id of ['send', 'respond', 'summary', 'research', 'new']) $(id).disabled = b;
+  document.querySelectorAll('[data-special]').forEach(x => (x.disabled = b));
+  if (b) $('next')?.remove();
+  $('stop').hidden = !b;
+}
+$('send').onclick = () => turn('ask');
+$('respond').onclick = () => turn('respond');
+$('summary').onclick = () => turn('summary');
+$('research').onclick = () => turn('research');
+document.querySelectorAll('[data-special]').forEach(b => (b.onclick = () => {
+  const i = $('input');
+  if (i.value.trim()) return turn(b.dataset.special);
+  i.value = META.special[b.dataset.special].template.trim();
+  const at = i.value.indexOf('：') + 1;
+  i.focus(); i.setSelectionRange(at, at);
+}));
+$('stop').onclick = () => api(`/api/convs/${conv.id}/stop`, { method: 'POST' });
+$('input').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); turn('ask'); } });
+
+(async () => {
+  META = await api('/api/meta');
+  if (!META.features?.research) $('research').hidden = true;
+  applySeatStyles();
+  updateComposerPlaceholder();
+  const list = await listConvs();
+  let last = null; try { last = localStorage.getItem('live-rt.last'); } catch {}
+  const pick = list.find(c => c.id === last) ?? list[0];
+  if (pick) await open(pick.id); else await create();
+})();
+</script>
+</body>
+</html>
