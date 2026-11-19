@@ -63,12 +63,26 @@ node bin/cli.mjs --open
 - `--doctor`：仅检查各 CLI 有没有装（不调用模型）
 - `--check`：给每个席位发一句话，检查登录和模型，并给出修复步骤
 
-### 方式三：推到 GitHub 后用 `npx` 直接跑
-把本目录推送到你的 GitHub 仓库后，朋友无需克隆或安装依赖，直接运行：
+### 方式三：不下载代码，用 `npx` 直接跑
+装好 Node.js 后，不用克隆仓库、也不用安装依赖，直接运行：
 
 ```bash
-npx github:<你的用户名>/live-roundtable --open
+npx github:chen98038/live-roundtable --open
 ```
+
+连接检查同样可以这样跑：
+
+```bash
+npx github:chen98038/live-roundtable --check
+```
+
+想把代码下载到本地（以后用 `git pull` 更新）：
+
+```bash
+git clone https://github.com/chen98038/live-roundtable.git
+```
+
+也可以在 [仓库页面](https://github.com/chen98038/live-roundtable) 点 **Code → Download ZIP**，解压后双击 `启动圆桌.command`。macOS 第一次可能提示无法验证开发者，右键 → **打开** 即可。
 
 ---
 
@@ -118,3 +132,9 @@ cp seats.example.json ~/.live-roundtable/seats.json
 | `GET /api/convs/:id/events` | 订阅实时 SSE 流（`start` / `delta` / `status` / `done` / `busy`） |
 | `POST /api/convs/:id/note` | 外部调研助手补充事实并触发指定席位更新判断 |
 | `POST /api/convs/:id/stop` | 停止当前正在执行的回合 |
+
+---
+
+## 许可证
+
+代码以 [MIT 许可证](LICENSE) 发布。`vendor/` 里随项目分发的第三方文件保留各自的许可：`marked.min.js` 为 MIT，`vendor/fonts/` 里的 Montserrat 和 Noto Sans SC 为 SIL OFL 1.1（见同目录下的授权文件）。

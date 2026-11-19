@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "多模型实时圆桌讨论（基于本地 Claude / Codex / Antigravity CLI，零第三方依赖）",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chen98038/live-roundtable.git"
+  },
   "engines": {
     "node": ">=20"
   },
@@ -16,7 +21,8 @@
     "prompts",
     "seats.example.json",
     "启动圆桌.command",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "start": "node ./bin/cli.mjs",
