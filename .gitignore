@@ -4,3 +4,4 @@ node_modules/
 seats.json
 .roundtable/
 conversations/
+.claude/

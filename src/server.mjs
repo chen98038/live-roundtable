@@ -6,19 +6,92 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createSay, findBin, inspectSeats, loadSeats } from './seats.mjs';
+import { applyFallbacks, CLI_SETUP, createSay, findBin, inspectSeats, loadSeats, probeAndApply, readFallbacks, runSeat } from './seats.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
 
 const bytes = s => Buffer.byteLength(s);
 const GEMINI_MAX = 170_000;
+// 随项目分发的字体（子集化 woff2，见 vendor/fonts/README.md），只放行这两个文件
+const FONTS = new Set(['/vendor/fonts/Montserrat-subset.woff2', '/vendor/fonts/NotoSansSC-subset.woff2']);
 
 const SUMMARY_SYS = '你是这场讨论的中立主持人，用中文。不站队，不替任何一方补论据。';
 const summaryPrompt = (c, whoFn) => `# 讨论记录\n\n${transcript(c, Infinity, whoFn)}\n\n# 请整理\n针对提问人最新的问题，用这几个小标题：\n## 回答\n综合大家的讨论直接回答提问人，3–6 句。有分歧时说清倾向哪边、为什么，或者取决于什么。\n## 共识\n## 分歧（谁持什么立场、理由；标出分歧来自判断标准、事实还是对未来的预测）\n## 关键事实（谁提出、有没有查证；冲突的标出来）\n## 还需要提问人回答或决定的问题\n## 下一层问题\n一句话：顺着这次的结论往下，提问人接下来最该让大家讨论的一个问题，写成能直接拿去问的话。\n## 深挖这处分歧\n一句话：针对上面最要紧的那处分歧，让大家把它讲透的一个问题，写成能直接拿去问的话。没有实质分歧就写「无」。\n简洁，总共不超过 900 字。`;
 
 const FOCUS_SYS = '你是这场讨论的主持人，用中文。不站队，不发表自己的观点，只负责让讨论往深处走。';
 const focusPrompt = (c, whoFn) => `# 讨论记录\n\n${transcript(c, Infinity, whoFn)}\n\n# 你的任务\n大家刚说完一轮。找出最新一轮里对回答提问人的问题最要紧的那一处分歧，判断它属于哪一种：判断标准不同、事实不同、还是对未来的预测不同。然后给下一轮提一个问题，逼大家正面回答这处分歧（标准不同就问该用哪个标准、为什么；事实不同就问证据；预测不同就问什么信号能分出对错）。\n格式，总共不超过 150 字：\n**核心分歧**：谁和谁在什么上不同（属于哪一种）\n**这轮请回答**：一个具体的问题\n如果已经没有实质分歧、再讨论只会重复，只写一行「【无分歧】」加一句原因。`;
+
+const PREPARE_SYS = '你是圆桌讨论的策划主持人。在正式开聊前，根据提问人的问题起草简洁的背景约束，并为每位参加的席位分配彼此互补、有张力的角色视角。不要直接回答问题，只输出严格合法的 JSON。';
+function preparePrompt(c, text, targetSeats, seatsMap) {
+  const existingBg = c.settings.background?.trim();
+  const existingPersonas = targetSeats
+    .map(id => [id, c.settings.personas?.[id]?.trim()])
+    .filter(([, p]) => p);
+  const seatList = targetSeats.map(id => `- ${id}（${seatsMap[id]?.label ?? id}）`).join('\n');
+  return [
+    `# 提问人的问题\n${text}`,
+    existingBg && `# 提问人已写好的背景（请保留其中的事实和约束，在此基础上补全整理）\n${existingBg}`,
+    existingPersonas.length && `# 已有角色设定（可保留或优化）\n${existingPersonas.map(([id, p]) => `- ${id}：${p}`).join('\n')}`,
+    `# 参加本场圆桌的席位\n${seatList}`,
+    `# 你的任务
+只输出一个严格合法的 JSON 对象（不要加解释说明）：
+{
+  "background": "精炼的背景与约束（80–250 字，分条写出目标、现状前提、关键边界；对明显缺失且会影响结论的信息，用「【待补充：……】」标出）",
+  "personas": {
+    ${targetSeats.map(id => `"${id}": "15–45 字的角色设定：明确该席位代表的视角、判断标准或负责挑哪类刺"`).join(',\n    ')}
+  },
+  "missing": [
+    "开聊前最值得提问人补充的 1–3 个关键事实或约束（每条不超过 25 字）"
+  ]
+}
+
+要求：
+1. personas 的 key 必须严格使用上面的席位 id，内容里不要写模型名字。
+2. 各位角色必须彼此错开、形成有价值的张力（例如：实操落地、反方挑刺/风险、成本与回报、长期/第一性原理、用户/一线视角等），不要让角色趋同。
+3. 不要直接回答提问人的问题，只做讨论前的背景梳理和角色分工。
+4. 默认用中文（除非提问人用其他语言提问）。`,
+  ].filter(Boolean).join('\n\n');
+}
+
+function parsePrepareOutput(raw, targetSeats) {
+  const txt = String(raw ?? '').trim();
+  const candidates = [txt];
+  const fenced = txt.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) candidates.push(fenced[1].trim());
+  const firstBrace = txt.indexOf('{');
+  const lastBrace = txt.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(txt.slice(firstBrace, lastBrace + 1));
+
+  let parsed = null;
+  for (const s of candidates) {
+    try {
+      const v = JSON.parse(s);
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        parsed = v;
+        break;
+      }
+    } catch {}
+  }
+  if (!parsed) return { error: '主持人返回的内容不是有效 JSON，请重试' };
+
+  const background = typeof parsed.background === 'string' ? parsed.background.trim() : '';
+  const personas = {};
+  if (parsed.personas && typeof parsed.personas === 'object' && !Array.isArray(parsed.personas)) {
+    const allowed = new Set(targetSeats);
+    for (const [k, v] of Object.entries(parsed.personas)) {
+      if (allowed.has(k) && typeof v === 'string' && v.trim()) personas[k] = v.trim();
+    }
+  }
+  const missing = Array.isArray(parsed.missing)
+    ? parsed.missing.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim()).slice(0, 4)
+    : [];
+
+  if (!background && !Object.keys(personas).length) {
+    return { error: '主持人没有生成有效的背景或角色，请重试' };
+  }
+  return { background, personas, missing };
+}
 
 const kindOf = c => {
   const u = c.messages.findLast(m => m.role === 'user');
@@ -116,9 +189,40 @@ export function createRoundtableServer(options = {}) {
     repoRoot: REPO_ROOT,
   });
 
+  applyFallbacks(loadedSeats, readFallbacks(dataDir));
+
   const findBinFn = options.findBinFn ?? findBin;
   const say = options.sayFn ?? createSay({ seats: loadedSeats, findBinFn });
-  const inspect = () => inspectSeats(loadedSeats, findBinFn);
+
+  // 连接自检：上次的结果存在 <dataDir>/probe.json，重启后还在；没有这个文件说明还没检查过（首次使用）
+  const probePath = join(dataDir, 'probe.json');
+  let probeResults = {};
+  try { probeResults = JSON.parse(readFileSync(probePath, 'utf8')).results ?? {}; } catch {}
+  let probing = null;
+  const probeOpts = { findBinFn, runFn: options.runSeatFn ?? runSeat, timeoutMs: options.probeTimeoutMs };
+  async function runProbe(ids) {
+    if (probing) return probing;
+    probing = (async () => {
+      const list = ids?.length ? ids.filter(id => loadedSeats[id]) : Object.keys(loadedSeats);
+      const done = await Promise.all(list.map(async id => [id, await probeAndApply(id, loadedSeats, dataDir, probeOpts)]));
+      Object.assign(probeResults, Object.fromEntries(done));
+      for (const id of Object.keys(probeResults)) if (!loadedSeats[id]) delete probeResults[id];
+      writeFileSync(probePath, `${JSON.stringify({ at: new Date().toISOString(), results: probeResults }, null, 2)}\n`);
+      return probeResults;
+    })();
+    try { return await probing; } finally { probing = null; }
+  }
+
+  const inspect = () => {
+    const out = inspectSeats(loadedSeats, findBinFn);
+    for (const [id, s] of Object.entries(out)) {
+      s.probe = probeResults[id] ?? null;
+      // 自检时 CLI 已经装上了，但上次结果还是“没装”，就别再拿旧结果吓人
+      if (s.available && s.probe?.kind === 'missing') s.probe = null;
+      s.setup = CLI_SETUP[s.cli] ?? null;
+    }
+    return out;
+  };
 
   const defaultEfforts = Object.fromEntries(
     Object.entries(loadedSeats)
@@ -128,7 +232,8 @@ export function createRoundtableServer(options = {}) {
 
   function defaultsFor(inspected) {
     return {
-      seats: Object.keys(inspected).filter(id => inspected[id].available),
+      // 自检没通过的席位（没登录、模型用不了等）默认不参加，免得一开讨论就报错
+      seats: Object.keys(inspected).filter(id => inspected[id].available && inspected[id].probe?.ok !== false),
       web: true,
       fast: true,
       effort: 'high',
@@ -136,6 +241,7 @@ export function createRoundtableServer(options = {}) {
       rounds: 2,
       autoSummary: true,
       moderator: '',
+      moderatorEffort: '',
       background: '',
       personas: {},
     };
@@ -254,7 +360,9 @@ export function createRoundtableServer(options = {}) {
       }
       const m = { id: randomUUID(), role, seat: seatId, text: '', at: new Date().toISOString(), pending: true };
       emit({ type: 'start', msg: m });
-      const effort = c.settings.efforts?.[seatId] || c.settings.effort || 'high';
+      // 主持人（定焦、清单、总结）可以单独指定思考强度；留空则跟随这位席位自己的设置
+      const effort = (role !== 'seat' && c.settings.moderatorEffort)
+        || c.settings.efforts?.[seatId] || c.settings.effort || 'high';
       const ac = new AbortController();
       const stopAll = () => ac.abort();
       signal.addEventListener('abort', stopAll, { once: true });
@@ -480,12 +588,17 @@ export function createRoundtableServer(options = {}) {
       if (url.pathname === '/vendor/marked.min.js' && (req.method === 'GET' || req.method === 'HEAD')) {
         return send(200, readFileSync(join(REPO_ROOT, 'vendor', 'marked.min.js')), 'application/javascript; charset=utf-8');
       }
+      if (FONTS.has(url.pathname) && (req.method === 'GET' || req.method === 'HEAD')) {
+        res.writeHead(200, { 'content-type': 'font/woff2', 'cache-control': 'public, max-age=86400' });
+        return res.end(req.method === 'HEAD' ? undefined : readFileSync(join(REPO_ROOT, url.pathname)));
+      }
       if (url.pathname === '/api/meta' && req.method === 'GET') {
         const inspected = inspect();
         return send(200, {
           seats: inspected,
           defaults: defaultsFor(inspected),
           features: { research: hasGptr },
+          probe: { checked: existsSync(probePath), running: Boolean(probing) },
           special: Object.fromEntries(
             Object.entries(SPECIAL).map(([k, x]) => [
               k,
@@ -493,6 +606,12 @@ export function createRoundtableServer(options = {}) {
             ]),
           ),
         });
+      }
+      if (url.pathname === '/api/probe' && req.method === 'POST') {
+        const b = await readBody(req);
+        await runProbe(Array.isArray(b.seats) ? b.seats : null);
+        const inspected = inspect();
+        return send(200, { seats: inspected, defaults: defaultsFor(inspected) });
       }
       if (url.pathname === '/api/convs' && req.method === 'GET') {
         const list = readdirSync(convDir)
@@ -552,6 +671,55 @@ export function createRoundtableServer(options = {}) {
         const r = await turn(c, { mode, text, role: 'user' });
         return send(r.error ? 409 : 200, r);
       }
+      if (action === 'prepare' && req.method === 'POST') {
+        const b = await readBody(req);
+        const text = (b.text ?? '').trim();
+        if (!text) return send(400, { error: '先写下你想讨论的问题' });
+        if (running.has(c.id)) return send(409, { error: '这场讨论正在进行一轮，等它结束再配局' });
+        const inspected = inspect();
+        const modSeat = moderatorOf(c, inspected);
+        if (!modSeat) {
+          return send(409, { error: '没有可用的主持人席位，请先安装并登录至少一个 CLI（claude / codex / agy）' });
+        }
+        const at = [...text.matchAll(/@([a-zA-Z0-9_-]+)/g)].map(x => x[1].toLowerCase()).filter(s => inspected[s]?.available);
+        const selected = (Array.isArray(b.seats) ? b.seats : (c.settings.seats ?? [])).filter(s => inspected[s]?.available);
+        const targetSeats = at.length ? [...new Set(at)] : (selected.length ? selected : [modSeat]);
+
+        const ac = new AbortController();
+        const onClose = () => { if (!res.writableEnded) ac.abort(); };
+        res.on('close', onClose);
+        const r = await say(modSeat, {
+          system: PREPARE_SYS,
+          prompt: preparePrompt(c, text, targetSeats, loadedSeats),
+          web: false,
+          effort: 'medium',
+          fast: c.settings.fast,
+          signal: ac.signal,
+        });
+        res.off('close', onClose);
+        if (ac.signal.aborted) return;
+        if (r.error) return send(502, { error: r.error });
+
+        const parsed = parsePrepareOutput(r.text, targetSeats);
+        if (parsed.error) return send(502, { error: parsed.error });
+
+        if (b.apply !== false) {
+          if (parsed.background) c.settings.background = parsed.background;
+          if (Object.keys(parsed.personas).length) {
+            c.settings.personas = { ...(c.settings.personas ?? {}), ...parsed.personas };
+          }
+          save(c);
+        }
+        return send(200, {
+          ok: true,
+          seat: modSeat,
+          ms: r.ms ?? 0,
+          background: parsed.background,
+          personas: parsed.personas,
+          missing: parsed.missing,
+          settings: c.settings,
+        });
+      }
       if (action === 'note' && req.method === 'POST') {
         const b = await readBody(req);
         if (!b.text?.trim()) return send(400, { error: 'text 不能为空' });
@@ -568,5 +736,5 @@ export function createRoundtableServer(options = {}) {
     }
   });
 
-  return { server, dataDir, convDir, seats: loadedSeats, seatsConfigPath, hasGptr, inspect };
+  return { server, dataDir, convDir, seats: loadedSeats, seatsConfigPath, hasGptr, inspect, runProbe };
 }

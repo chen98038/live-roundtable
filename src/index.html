@@ -1,163 +1,462 @@
 <!doctype html>
-<html lang="zh">
+<html lang="zh" data-layout="a">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>实时圆桌</title>
+<!-- 三种界面共存，用户在左侧栏底部自己选；先于样式读出上次的选择，避免闪一下 -->
+<script>try { const l = localStorage.getItem('live-rt.layout'); if (['a', 'b', 'c'].includes(l)) document.documentElement.dataset.layout = l; } catch {}</script>
 <script src="/vendor/marked.min.js"></script>
+<link rel="preload" href="/vendor/fonts/Montserrat-subset.woff2" as="font" type="font/woff2" crossorigin>
 <style>
-/* 布局：左边是讨论列表，中间是对话，设置收在对话顶上；席位颜色由 /api/meta 动态注入 */
+/* 字体与 AFFiNE 一致：英文 Montserrat、中文 Noto Sans SC。随项目带子集化 woff2，没装这两个字体的电脑也一样显示；
+   子集外的生僻字依次退回本机 Noto Sans SC、苹方、雅黑 */
+@font-face { font-family: "RT Montserrat"; src: url(/vendor/fonts/Montserrat-subset.woff2) format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
+@font-face { font-family: "RT Noto Sans SC"; src: url(/vendor/fonts/NotoSansSC-subset.woff2) format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
+
+/* ============ 公共部分：三种界面都用 ============ */
+/* 每种界面在后面各自定配色（--bg --panel --ink --muted --line --soft --accent --accent-ink）；席位颜色由 /api/meta 动态注入 */
 :root {
-  --bg: #f4f5f2; --panel: #ffffff; --ink: #1b1f1d; --muted: #66706b; --line: #d9ddd6; --soft: #eceee9;
-  --accent: #2f5d50;
-  --research: #0e7490; --summary: #6b5b95; --helper: #9a6700; --user: #1b1f1d;
-  --err: #b42318; --errbg: #fdecea;
-  --warn: #9a6700; --warnbg: #fef7e0;
-  --display: "Noto Serif SC", "Songti SC", "STSong", "SimSun", Georgia, serif;
-  --body: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --research: #0e7490; --summary: #6b5b95; --helper: #9a6700; --user: var(--ink);
+  --err: #b42318; --errbg: #fdecea; --warn: #9a6700; --warnbg: #fef7e0;
+  --display: "RT Montserrat", "RT Noto Sans SC", Montserrat, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --body: var(--display);
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --shadow: 0 1px 2px rgb(0 0 0 / .05), 0 10px 28px -14px rgb(0 0 0 / .22);
 }
 @media (prefers-color-scheme: dark) { :root {
-  --bg: #121514; --panel: #1a1e1c; --ink: #e5e9e6; --muted: #98a29d; --line: #2c3330; --soft: #222825;
-  --accent: #8cc7b4; --research: #4cc3dc; --summary: #b8a6e6; --helper: #e3b341; --user: #e5e9e6;
-  --err: #ff8a80; --errbg: #3a1d1b; --warn: #f0c05a; --warnbg: #322a14; color-scheme: dark; } }
+  --research: #4cc3dc; --summary: #b8a6e6; --helper: #e3b341;
+  --err: #ff8a80; --errbg: #3a1d1b; --warn: #f0c05a; --warnbg: #322a14; color-scheme: dark;
+  --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 12px 30px -14px rgb(0 0 0 / .7);
+} }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.7 var(--body); }
 button, select, input, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
+h1, h2, h3, h4, p { margin: 0; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.muted { color: var(--muted); }
 
-.app { display: grid; grid-template-columns: 250px 1fr; height: 100%; }
-aside { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--soft); }
-aside header { padding: 16px; display: grid; gap: 10px; }
-aside h1 { font: 600 20px var(--display); margin: 0; }
-.new { border: 1px solid var(--accent); color: var(--accent); background: var(--panel); border-radius: 6px; padding: 6px 10px; }
-.convs { overflow-y: auto; padding: 0 8px 16px; display: grid; gap: 2px; align-content: start; }
-.conv { text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 8px 10px; display: grid; gap: 2px; }
-.conv:hover { background: var(--panel); }
-.conv.on { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
-.conv .t { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conv .d { font-size: 12px; color: var(--muted); }
+/* 头像：席位 id 的首字母，底色取席位颜色；正在想或正在写时外圈闪动 */
+.av { flex: none; width: 26px; height: 26px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 12px; font-weight: 700; line-height: 1; color: var(--c); background: color-mix(in srgb, var(--c) 17%, var(--panel)); }
+[data-state="thinking"] .av, [data-state="writing"] .av { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--c); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px color-mix(in srgb, var(--c) 30%, transparent); } }
+.stack { display: flex; flex: none; } .stack > * { margin-left: -7px; display: flex; } .stack > :first-child { margin-left: 0; }
+.stack .av { box-shadow: 0 0 0 2px var(--panel); }
 
-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.top { border-bottom: 1px solid var(--line); padding: 10px 20px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; background: var(--panel); }
-.top .title { font: 600 16px var(--display); flex: 1 1 200px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.seatpick { display: flex; gap: 6px; flex-wrap: wrap; }
-.pill { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 13px; background: var(--panel); user-select: none; cursor: pointer; }
-.pill.off { opacity: .45; cursor: not-allowed; }
-.pill input { margin: 0; accent-color: var(--c, var(--accent)); }
-.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--accent)); }
-.opts { display: flex; gap: 12px; align-items: center; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
-.opts label { display: inline-flex; gap: 5px; align-items: center; }
-.opts select { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 1px 4px; }
-.link { border: 0; background: none; color: var(--accent); font-size: 13px; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
-.more { border-bottom: 1px solid var(--line); padding: 12px 20px; display: grid; gap: 10px; background: var(--soft); }
-.more textarea, .more input { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: var(--panel); font-size: 14px; }
-.more .row { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; align-items: center; font-size: 13px; }
-.more .row select { border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; background: var(--panel); font-size: 13px; }
-.more .hint { font-size: 12px; color: var(--muted); }
+/* 发言正文（markdown） */
+.md { min-width: 0; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 .65em; } .md ul, .md ol { margin: 0 0 .65em; padding-left: 1.4em; }
+.md li + li { margin-top: .15em; }
+.md h1, .md h2, .md h3 { font-size: 15px; margin: 1em 0 .3em; }
+.md table { border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--line); padding: 3px 8px; }
+.md code { font-family: var(--mono); font-size: 12.5px; background: var(--soft); border-radius: 4px; padding: 1px 4px; }
+.md pre { background: var(--soft); border-radius: 8px; padding: 10px 12px; overflow-x: auto; } .md pre code { background: none; padding: 0; }
+.md a { color: var(--accent); }
+.md blockquote { margin: 0 0 .65em; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
 
-.log { flex: 1; overflow-y: auto; padding: 20px; display: grid; gap: 18px; align-content: start; }
-.empty { color: var(--muted); max-width: 62ch; margin: 36px auto; display: grid; gap: 10px; font-size: 14px; }
-.empty h2 { font: 600 22px var(--display); color: var(--ink); margin: 0; }
-.warnbox { background: var(--warnbg); border: 1px solid var(--warn); color: var(--ink); border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; }
-.warnbox b { color: var(--warn); }
-.warnbox ul { margin: 0; padding-left: 1.3em; }
-.msg { max-width: 860px; width: 100%; margin: 0 auto; display: grid; gap: 4px; }
-.msg .who { font-size: 13px; font-weight: 700; color: var(--c); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.msg .who .meta { font-weight: 400; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.msg .body { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--c); border-radius: 6px; padding: 10px 14px; min-width: 0; overflow-wrap: anywhere; }
-.msg.user .body { background: var(--soft); border-left-color: var(--user); }
-.msg.research .body { max-height: 420px; overflow-y: auto; }
-.msg .body > :first-child { margin-top: 0; } .msg .body > :last-child { margin-bottom: 0; }
-.msg .body p { margin: 0 0 .6em; } .msg .body ul, .msg .body ol { margin: 0 0 .6em; padding-left: 1.4em; }
-.msg .body h1, .msg .body h2, .msg .body h3 { font-size: 15px; margin: .8em 0 .3em; }
-.msg .body table { border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; }
-.msg .body th, .msg .body td { border: 1px solid var(--line); padding: 3px 6px; }
-.msg .body code { font-family: var(--mono); font-size: 12.5px; }
-.msg .body a { color: var(--accent); }
-.copy { font: inherit; font-size: 12px; font-weight: 400; color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; cursor: pointer; }
-.copy:hover { color: var(--c); border-color: var(--c); }
-.msg .who .copy { margin-left: auto; }
-.msg .foot { display: flex; justify-content: flex-end; }
 .status { font-size: 12.5px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
-.spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--c); animation: spin .8s linear infinite; }
+.spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--c, var(--accent)); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
-details.process { max-width: 860px; width: 100%; margin: 0 auto; border: 1px dashed var(--line); border-radius: 6px; padding: 6px 12px; }
-details.process > summary { cursor: pointer; font-size: 13px; color: var(--muted); }
-details.process[open] { display: grid; gap: 18px; padding-bottom: 12px; }
-.msg.summary .body { background: var(--soft); }
-.msg.moderator .body { background: var(--soft); font-size: 14px; }
-.next { max-width: 860px; width: 100%; margin: -8px auto 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
-.next .nq { display: grid; gap: 2px; text-align: left; flex: 1 1 260px; border-color: var(--summary); }
-.next .nq b { font-size: 13px; color: var(--summary); }
-.next .nq span { font-size: 13.5px; }
-.err { color: var(--err); background: var(--errbg); border-radius: 4px; padding: 4px 8px; font-size: 13px; }
-details.src { font-size: 12.5px; color: var(--muted); }
-details.src ul { margin: 4px 0 0; padding-left: 1.2em; }
-details.src a { color: var(--muted); overflow-wrap: anywhere; }
+.tm { font-variant-numeric: tabular-nums; }
+.err { color: var(--err); background: var(--errbg); border-radius: 6px; padding: 4px 10px; font-size: 13px; }
+.warnbox { background: var(--warnbg); border: 1px solid var(--warn); border-radius: 10px; padding: 12px 14px; display: grid; gap: 6px; font-size: 14px; }
+.warnbox b { color: var(--warn); } .warnbox ul { margin: 0; padding-left: 1.3em; }
 
-.composer { border-top: 1px solid var(--line); padding: 12px 20px 16px; background: var(--panel); display: grid; gap: 8px; }
-.composer textarea { width: 100%; max-width: 860px; margin: 0 auto; display: block; min-height: 64px; max-height: 40vh; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
-.actions { max-width: 860px; width: 100%; margin: 0 auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.btn { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 5px 12px; font-size: 14px; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); }
-.btn:disabled { opacity: .45; cursor: default; }
+/* 连接自检：每位一行状态，下面是去重后的修复步骤 */
+.probe { display: grid; gap: 8px; font-size: 13px; }
+.probe .bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.probe .bar .sethint { flex: 1; min-width: 12em; }
+.probe ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.probe li { display: grid; grid-template-columns: 1.2em minmax(7em, auto) 1fr; gap: 6px; align-items: baseline; }
+.probe .st { font-weight: 700; text-align: center; }
+.probe .ok .st { color: #1f7a4d; } .probe .bad .st { color: var(--err); } .probe .warn .st, .probe .wait .st { color: var(--warn); } .probe .unk .st { color: var(--muted); }
+.probe .nm { font-weight: 600; white-space: nowrap; }
+.probe .why { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+.probe .fixes { border-top: 1px dashed var(--line); padding-top: 8px; display: grid; gap: 6px; }
+.probe .fixes b { font-size: 12px; color: var(--muted); font-weight: 600; }
+.probe .fix { display: grid; gap: 2px; }
+.probe code { font-family: var(--mono); font-size: 12px; background: var(--soft); border-radius: 4px; padding: 1px 5px; user-select: all; overflow-wrap: anywhere; }
+.probe details { color: var(--muted); font-size: 12px; } .probe details pre { white-space: pre-wrap; margin: 4px 0 0; font-family: var(--mono); font-size: 11.5px; }
+.empty .probe { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.empty .probe.bad { border-color: var(--warn); background: var(--warnbg); }
+@media (prefers-color-scheme: dark) { .probe .ok .st { color: #5fcf95; } }
+details.src { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+details.src summary { cursor: pointer; }
+details.src ul { margin: 4px 0 0; padding-left: 1.2em; } details.src a { color: var(--muted); overflow-wrap: anywhere; }
+.copy { font-size: 12px; color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 6px; padding: 0 7px; line-height: 20px; white-space: nowrap; }
+.copy:hover { color: var(--c, var(--accent)); border-color: currentColor; }
+.name { font-weight: 700; font-size: 13.5px; color: var(--c); }
+.meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.kick { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.head .copy { margin-left: auto; }
+
+/* 开关 */
+.sw { appearance: none; -webkit-appearance: none; flex: none; width: 30px; height: 18px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 45%, transparent); position: relative; margin: 0; cursor: pointer; }
+.sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / .3); }
+body.ready .sw { transition: background .15s; } body.ready .sw::after { transition: transform .15s; }   /* 首次填入设置时不播动画 */
+.sw:checked { background: var(--c, var(--accent)); } .sw:checked::after { transform: translateX(12px); }
+.sw:disabled { opacity: .5; cursor: not-allowed; }
+
+/* 按钮 */
+.btn { border: 1px solid var(--line); border-radius: 9px; background: var(--panel); padding: 5px 14px; font-size: 14px; white-space: nowrap; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
 .btn.stop { border-color: var(--err); color: var(--err); }
-.btn.rank { border-color: var(--summary); color: var(--summary); }
-.actions .hint { font-size: 12px; color: var(--muted); margin-left: auto; }
+.btn:disabled, .chip:disabled, .modecard:disabled { opacity: .45; cursor: default; }
+.btn kbd { font: inherit; font-size: 11px; font-weight: 400; opacity: .75; margin-left: 4px; }
+.chip { border: 1px solid var(--line); background: none; border-radius: 999px; padding: 2px 11px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.chip:hover:not(:disabled) { color: var(--ink); border-color: var(--muted); }
+.chip.prep { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); color: var(--accent); }
+.chip.prep:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.chip.mode { border-style: dashed; border-color: color-mix(in srgb, var(--summary) 55%, var(--line)); color: var(--summary); }
+.prepbox { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: 10px; padding: 10px 12px; display: grid; gap: 8px; font-size: 13px; }
+.prepbox .head { gap: 8px; align-items: center; }
+.prepbox .head b { color: var(--accent); font-size: 13px; }
+.prepbox .head .icon { margin: -6px -6px -6px auto; width: 24px; height: 24px; font-size: 13px; }
+.prepbox .miss { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: 12.5px; display: grid; gap: 2px; }
+.prepbox .acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.prepbox .btn { padding: 3px 12px; font-size: 13px; }
+.prep-flash { border-color: var(--accent) !important; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
+.link { border: 0; background: none; padding: 0; color: var(--accent); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
+.icon { flex: none; border: 0; background: none; width: 30px; height: 30px; border-radius: 8px; color: var(--muted); display: grid; place-items: center; font-size: 16px; }
+.icon:hover { background: var(--soft); color: var(--ink); }
 
+/* 骨架：左边讨论列表，中间对话，设置面板的位置由各界面决定 */
+.app { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; height: 100%; }
+main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.top { display: flex; align-items: center; gap: 10px; padding: 9px 16px 9px 10px; }
+.title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setbtn { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 55%; border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 3px 12px; font-size: 12.5px; color: var(--muted); }
+.setbtn:hover, body.set-open .setbtn { border-color: var(--accent); color: var(--ink); }
+.setbtn b { color: var(--ink); font-weight: 600; white-space: nowrap; }
+.setbtn .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setbtn .chev { flex: none; width: 6px; height: 6px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); margin: -3px 3px 0 0; }
+.strip { display: none; }
+.log { flex: 1; overflow-y: auto; }
+.notice { max-width: var(--measure); margin: 12px auto 0; }
+
+/* 讨论列表，底部是界面切换 */
+.nav { width: 248px; border-right: 1px solid var(--line); background: var(--soft); display: flex; flex-direction: column; min-height: 0; }
+.nav header { padding: 14px 14px 10px; display: flex; align-items: center; gap: 8px; }
+.nav h1 { font: 700 17px var(--display); flex: 1; letter-spacing: .02em; }
+.nav .new { border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 3px 10px; font-size: 13px; color: var(--accent); font-weight: 600; }
+.nav .new:hover { border-color: var(--accent); } .nav .new:disabled { opacity: .45; }
+.convs { flex: 1; overflow-y: auto; padding: 0 8px 16px; display: grid; gap: 1px; align-content: start; }
+.grp { font-size: 11.5px; color: var(--muted); padding: 12px 10px 4px; letter-spacing: .06em; }
+.conv { text-align: left; border: 0; background: none; border-radius: 8px; padding: 7px 10px; display: grid; gap: 1px; min-width: 0; }
+.conv:hover { background: color-mix(in srgb, var(--panel) 60%, transparent); }
+.conv.on { background: var(--panel); box-shadow: 0 0 0 1px var(--line); }
+.conv .t { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv.on .t { font-weight: 600; }
+.conv .d { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.layouts { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.layouts .seg { flex: 1; display: flex; border: 1px solid var(--line); border-radius: 9px; padding: 2px; background: var(--bg); }
+.layouts button { flex: 1; border: 0; background: none; border-radius: 7px; padding: 2px 0; font-size: 12.5px; color: var(--muted); }
+.layouts button:hover { color: var(--ink); }
+.layouts button[aria-pressed="true"] { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / .18); }
+
+/* 设置面板：谁参加、每位的角色和思考强度、怎么讨论 */
+#more { display: none; gap: 12px; align-content: start; overflow-y: auto; background: var(--panel); }
+body.set-open #more { display: grid; }
+#more h3 { font-size: 12px; color: var(--muted); letter-spacing: .08em; font-weight: 600; display: flex; align-items: center; min-height: 18px; }
+#more h3 .icon { margin: -8px -6px -8px auto; }
+#seatlist { display: grid; gap: 8px; }
+.opts { display: grid; gap: 12px; }
+.tgs { display: flex; gap: 8px 18px; flex-wrap: wrap; }
+.tg { display: inline-flex; gap: 8px; align-items: center; font-size: 13.5px; cursor: pointer; }
+.flds { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.fld { display: grid; gap: 3px; font-size: 12px; color: var(--muted); }
+.fld select, .fld textarea, .persona, .seatrow select { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); padding: 5px 8px; font-size: 13.5px; color: var(--ink); min-width: 0; }
+.fld textarea { resize: vertical; min-height: 64px; }
+.seatrow { display: grid; grid-template-columns: 184px 1fr auto; gap: 8px; align-items: center; }
+.seatrow .who { display: flex; align-items: center; gap: 8px; cursor: pointer; min-width: 0; }
+.seatrow .nm { font-size: 13.5px; font-weight: 600; white-space: nowrap; }
+.seatrow .ps { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.seatrow.off { opacity: .5; } .seatrow.off .who { cursor: not-allowed; }
+.seatrow:has(.sw:not(:checked)) .av, .seatrow:has(.sw:not(:checked)) .nm { opacity: .5; }
+.sethint { font-size: 12px; color: var(--muted); }
+
+/* 输入区：一个主按钮，其余动作退到左下角 */
+.composer { padding: 0 20px 12px; }
+.composer .box { max-width: var(--measure); margin: 0 auto; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 4px; }
+.composer .box:focus-within { border-color: var(--accent); }
+.composer textarea { display: block; width: 100%; border: 0; background: none; resize: none; padding: 10px 12px 6px; min-height: 54px; max-height: 40vh; outline: none; }
+.composer .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 4px 6px 6px; }
+.quick { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-right: auto; }
+.quick .sep { width: 1px; height: 16px; background: var(--line); margin: 0 2px; }
+.composer .hint { max-width: var(--measure); margin: 6px auto 0; font-size: 12px; color: var(--muted); text-align: right; }
+.composer .hint:empty { display: none; }
+
+/* 总结后的快捷追问 */
+.next { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+.nq { text-align: left; display: grid; gap: 2px; border: 1px solid var(--line); background: var(--panel); border-radius: 12px; padding: 10px 14px; }
+.nq:hover { border-color: var(--summary); }
+.nq b { font-size: 12px; color: var(--summary); letter-spacing: .04em; }
+.nq span { font-size: 13.5px; line-height: 1.55; }
+.next .adjust { grid-column: 1 / -1; justify-self: start; }
+
+/* 空白页 */
+.empty { max-width: 620px; margin: 6vh auto 0; display: grid; gap: 16px; }
+.empty h2 { font: 700 26px var(--display); }
+.empty .lead { color: var(--muted); }
+.how { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; counter-reset: how; }
+.how li { counter-increment: how; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: grid; gap: 2px; background: var(--panel); }
+.how li::before { content: counter(how); font: 700 12px var(--display); color: var(--accent); }
+.how b { font-size: 14px; } .how span { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.modecard { text-align: left; border: 1px dashed color-mix(in srgb, var(--summary) 55%, var(--line)); background: none; border-radius: 12px; padding: 10px 12px; display: grid; gap: 2px; }
+.modecard:hover:not(:disabled) { background: color-mix(in srgb, var(--summary) 7%, transparent); }
+.modecard b { font-size: 14px; color: var(--summary); } .modecard span { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+
+/* 窄屏：讨论列表变成抽屉 */
 @media (max-width: 760px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
-  .log, .top, .composer, .more { padding-left: 12px; padding-right: 12px; }
-  .actions .hint { display: none; }
+  .nav { position: fixed; inset: 0 auto 0 0; z-index: 30; transform: translateX(-100%); transition: transform .18s; }
+  body.nav-toggled .nav { transform: none; box-shadow: var(--shadow); }
+  .composer { padding: 0 10px 10px; }
+  .seatrow { grid-template-columns: 1fr auto; } .seatrow .persona { grid-column: 1 / -1; grid-row: 2; }
+  .setbtn .sum { display: none; }
+}
+@media (min-width: 761px) { body.nav-toggled .nav { display: none; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ============ 界面 A「对话」：一条对话往下读，按阶段分段，总结最醒目；设置是顶栏落下来的一张面板 ============ */
+:root[data-layout="a"] {
+  --bg: #f6f7f4; --panel: #ffffff; --ink: #1b1f1d; --muted: #66706b; --line: #dfe3dc; --soft: #eceee9;
+  --accent: #2f5d50; --accent-ink: #ffffff; --measure: 780px;
+  @media (prefers-color-scheme: dark) {
+    --bg: #121514; --panel: #1a1e1c; --ink: #e5e9e6; --muted: #98a29d; --line: #2c3330; --soft: #202523;
+    --accent: #8cc7b4; --accent-ink: #0f1f1a;
+  }
+  .top { border-bottom: 1px solid var(--line); background: var(--panel); }
+  .title { font: 600 16px var(--display); }
+  .setbtn { border-radius: 999px; padding: 3px 12px 3px 4px; gap: 10px; }
+  #more { position: fixed; top: 54px; right: 12px; width: min(720px, calc(100% - 24px)); max-height: calc(100% - 70px); z-index: 10; border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 16px 18px 14px; }
+  #closeMore { display: none; }
+
+  .log { padding: 24px 20px 28px; }
+  .thread { max-width: var(--measure); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .q { display: grid; gap: 2px; padding-top: 10px; }
+  .q:first-child { padding-top: 0; }
+  .q .text { font: 600 18px/1.55 var(--display); }
+  .q.long .text { font: 400 15px/1.7 var(--body); background: var(--soft); border-radius: 12px; padding: 10px 14px; }
+  .phase { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); letter-spacing: .06em; }
+  .phase b { color: var(--ink); font-weight: 600; }
+  .phase::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .msg { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 0 12px; }
+  .msg .head { align-items: baseline; min-height: 26px; }
+  .msg .copy { opacity: 0; }
+  .msg:hover .copy, .copy:focus-visible { opacity: 1; }
+  .msg.moderator .body, .msg.research .body { background: color-mix(in srgb, var(--c) 9%, var(--panel)); border-radius: 12px; padding: 10px 14px; margin-top: 2px; }
+  .msg.research .body { max-height: 420px; overflow-y: auto; }
+  .process { border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--soft) 55%, transparent); }
+  .process > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 8px 12px; font-size: 13px; color: var(--muted); }
+  .process > summary::-webkit-details-marker { display: none; }
+  .process > summary::after { content: "展开"; margin-left: auto; color: var(--accent); }
+  .process[open] > summary::after { content: "收起"; }
+  .process > .thread { padding: 8px 14px 16px; }
+  .sumcard { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--summary); border-radius: 14px; padding: 14px 20px 18px; box-shadow: var(--shadow); --c: var(--summary); }
+  .sumcard .head { margin-bottom: 10px; }
+  .sumcard .md h2 { font-size: 12px; font-weight: 700; color: var(--summary); letter-spacing: .08em; margin: 1.3em 0 .35em; }
+  .sumcard .md h2:first-child + p { font-size: 16px; line-height: 1.75; }
+  @media (max-width: 760px) { .log { padding: 16px 12px 20px; } }
+}
+
+/* ============ 界面 B「并排」：同一阶段各位的发言并排成卡片，横着比；顶栏下一排席位，点一下参加或退出 ============ */
+:root[data-layout="b"] {
+  --bg: #f2f3f6; --panel: #ffffff; --ink: #171a1f; --muted: #636b78; --line: #dcdfe6; --soft: #e8eaef;
+  --accent: #3454d1; --accent-ink: #ffffff; --measure: 1180px;
+  @media (prefers-color-scheme: dark) {
+    --bg: #0f1115; --panel: #181b21; --ink: #e6e8ec; --muted: #9299a6; --line: #2a2f38; --soft: #1e222a;
+    --accent: #93a8ff; --accent-ink: #0d1330;
+  }
+  .nav { width: 224px; }
+  .top { background: var(--panel); }
+  .title { font: 600 16px var(--display); }
+  .setbtn { background: none; }
+  .strip { display: flex; gap: 6px; padding: 0 16px 10px; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+  .strip::-webkit-scrollbar { display: none; }
+  .seat { flex: 1 0 auto; display: flex; align-items: center; gap: 8px; padding: 5px 12px 5px 6px; border: 1px solid var(--line); border-bottom: 2px solid var(--c); border-radius: 10px; cursor: pointer; user-select: none; background: var(--bg); }
+  .seat input { position: absolute; opacity: 0; pointer-events: none; }
+  .seat:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .seat .txt { display: grid; }
+  .seat .nm { font-size: 13px; font-weight: 600; white-space: nowrap; line-height: 1.3; }
+  .seat .ps { font-size: 11px; color: var(--muted); white-space: nowrap; line-height: 1.3; }
+  .seat .ps:empty::before { content: "参加"; }
+  .seat[data-state="off"] { border-style: dashed; border-bottom-color: var(--line); background: none; }
+  .seat[data-state="off"] .av, .seat[data-state="off"] .nm { opacity: .45; }
+  .seat.unavailable { cursor: not-allowed; }
+  .seat[data-state="thinking"] .ps, .seat[data-state="writing"] .ps { color: var(--c); }
+  #more { position: fixed; top: 47px; right: 0; bottom: 0; width: min(420px, 100%); z-index: 10; border-left: 1px solid var(--line); box-shadow: var(--shadow); padding: 16px 18px; }
+  #more .seatrow { grid-template-columns: 1fr auto; }
+  #more .seatrow .persona { grid-column: 1 / -1; grid-row: 2; }
+
+  .log { padding: 22px 20px 28px; }
+  .turn { max-width: var(--measure); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .turn + .turn { margin-top: 34px; padding-top: 26px; border-top: 1px solid var(--line); }
+  .q .text { font: 600 19px/1.5 var(--display); max-width: 60em; }
+  .q.long .text { font: 400 15px/1.7 var(--body); background: var(--soft); border-radius: 12px; padding: 10px 14px; }
+  .band { display: grid; gap: 10px; }
+  .band-h { display: flex; align-items: center; gap: 10px; font-size: 13px; margin-top: 6px; }
+  .band-h .num { width: 22px; height: 22px; border-radius: 7px; background: var(--ink); color: var(--bg); display: grid; place-items: center; font: 700 12px var(--display); }
+  .band-h b { font-size: 14px; }
+  .band-h .link { margin-left: auto; }
+  .focus { background: color-mix(in srgb, var(--summary) 9%, var(--panel)); border: 1px solid color-mix(in srgb, var(--summary) 30%, var(--line)); border-radius: 12px; padding: 10px 14px; --c: var(--summary); }
+  .focus .head, .block .head { margin-bottom: 4px; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; align-items: start; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--c); border-radius: 12px; padding: 10px 14px 12px; display: grid; gap: 8px; min-width: 0; }
+  .card-h { display: flex; gap: 8px; align-items: center; }
+  .card-h .who { display: grid; min-width: 0; flex: 1; line-height: 1.35; }
+  .card-h .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .copy { opacity: 0; align-self: start; } .card:hover .copy, .card .copy:focus-visible { opacity: 1; }
+  .card .body { font-size: 14px; line-height: 1.65; max-height: 232px; overflow: hidden; }
+  .card.open .body { max-height: none; }
+  .card.clamped .body { -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+  .card .more { display: none; justify-self: start; }
+  .card.clamped .more, .card.open.wasclamped .more { display: block; }
+  .sumboard { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--summary); border-radius: 14px; padding: 14px 18px 18px; box-shadow: var(--shadow); --c: var(--summary); display: grid; gap: 12px; margin-top: 6px; }
+  .sumboard .lead { font-size: 16px; line-height: 1.75; max-width: 62em; }
+  .sumgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+  .sumgrid section { background: var(--bg); border-radius: 10px; padding: 10px 14px; font-size: 14px; }
+  .sumgrid h4 { font-size: 12px; color: var(--summary); letter-spacing: .08em; margin-bottom: 4px; }
+  .block { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--c); border-radius: 12px; padding: 10px 14px; }
+  .block.research .body { max-height: 420px; overflow-y: auto; }
+  @media (max-width: 760px) { .log { padding: 16px 12px 20px; } .strip { padding: 0 12px 10px; } }
+}
+
+/* ============ 界面 C「简报」：问题下面先是结论，过程收成每人一行、点开看全文；设置常驻右侧「圆桌」栏 ============ */
+:root[data-layout="c"] {
+  --bg: #f7f5f0; --panel: #fffdf9; --ink: #211e19; --muted: #6f695f; --line: #e2ddd2; --soft: #efebe2;
+  --accent: #9a4a1f; --accent-ink: #ffffff; --measure: 720px;
+  @media (prefers-color-scheme: dark) {
+    --bg: #151412; --panel: #1d1b18; --ink: #ebe7df; --muted: #a39d91; --line: #312e29; --soft: #232120;
+    --accent: #e3a577; --accent-ink: #24130a;
+  }
+  .top { border-bottom: 1px solid var(--line); padding-right: 12px; }
+  .title { font-size: 13.5px; color: var(--muted); }
+  .setbtn { border-radius: 999px; padding: 3px 12px 3px 4px; }
+  .setbtn .av { width: 22px; height: 22px; font-size: 11px; }
+  #more { width: 316px; border-left: 1px solid var(--line); background: var(--soft); padding: 14px 14px 20px; }
+  #more h3:first-child { font: 700 15px var(--display); color: var(--ink); letter-spacing: 0; }
+  #seatlist { gap: 6px; }
+  #more .seatrow { grid-template-columns: 1fr auto; gap: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; }
+  #more .seatrow .who { grid-column: 1 / -1; }
+  #more .seatrow .sw { order: 3; margin-left: auto; }
+  #more .seatrow[data-state="thinking"] .ps, #more .seatrow[data-state="writing"] .ps { color: var(--c); }
+  #more .seatrow .persona, #more .seatrow select { font-size: 12.5px; padding: 3px 8px; }
+  #more .seatrow:has(.sw:not(:checked)) .persona, #more .seatrow:has(.sw:not(:checked)) select { display: none; }
+  #more .fld select, #more .fld textarea { background: var(--panel); }
+  @media (max-width: 1100px) { #more { position: fixed; inset: 0 0 0 auto; z-index: 30; width: min(340px, 100%); box-shadow: var(--shadow); } }
+
+  .log { padding: 28px 24px 32px; }
+  .turn { max-width: var(--measure); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .turn + .turn { margin-top: 44px; padding-top: 34px; border-top: 1px solid var(--line); }
+  .qh { display: grid; gap: 4px; }
+  .qh h2 { font: 700 24px/1.4 var(--display); letter-spacing: .01em; }
+  .qh.long h2 { font: 400 15px/1.7 var(--body); background: var(--soft); border-radius: 12px; padding: 10px 14px; }
+  .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; color: var(--muted); }
+  .steps li { display: flex; align-items: center; gap: 6px; }
+  .steps li::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .steps li:not(:last-child)::after { content: ""; width: 18px; height: 1px; background: var(--line); margin-left: 2px; }
+  .steps li.live { color: var(--ink); font-weight: 600; }
+  .steps li.live::before { background: none; border: 2px solid var(--accent); border-top-color: transparent; width: 9px; height: 9px; animation: spin .8s linear infinite; }
+  .steps span { font-variant-numeric: tabular-nums; font-weight: 400; }
+  .brief { --c: var(--summary); display: grid; gap: 8px; }
+  .brief .md h2 { font-size: 12px; font-weight: 700; color: var(--summary); letter-spacing: .08em; margin: 1.5em 0 .35em; }
+  .brief.ans .md h2:first-child { display: none; }
+  .brief.ans .md h2:first-child + p { font-size: 17px; line-height: 1.8; padding-left: 14px; border-left: 3px solid var(--summary); }
+  .proc { background: var(--soft); border-radius: 14px; padding: 6px 10px 10px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .proc > h3 { font-size: 12px; color: var(--muted); letter-spacing: .08em; font-weight: 600; padding: 8px 6px 2px; }
+  .ph { font-size: 12px; color: var(--muted); padding: 10px 6px 2px; display: flex; gap: 8px; }
+  .ph b { color: var(--ink); font-weight: 600; }
+  .row { border-radius: 10px; }
+  .row > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 10px; min-width: 0; }
+  .row > summary::-webkit-details-marker { display: none; }
+  .row > summary:hover { background: color-mix(in srgb, var(--panel) 70%, transparent); }
+  .row .name, .row > summary .meta { flex: none; }
+  .row .ex { flex: 1; min-width: 0; font-size: 13.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row[open] { background: var(--panel); box-shadow: 0 0 0 1px var(--line); margin: 4px 0; }
+  .row[open] > summary .ex { visibility: hidden; }
+  .row .full { padding: 2px 14px 12px 42px; display: grid; gap: 6px; }
+  .row .full .copy { justify-self: start; }
+  .row.moderator > summary .ex { color: var(--ink); }
+  .row.research .body { max-height: 420px; overflow-y: auto; }
+  @media (max-width: 760px) { .log { padding: 18px 14px 22px; } .qh h2 { font-size: 20px; } .row > summary .meta { display: none; } .row .full { padding-left: 14px; } }
 }
 </style>
 </head>
 <body>
 <div class="app">
-  <aside>
+  <aside class="nav">
     <header><h1>实时圆桌</h1><button class="new" id="new">＋ 新讨论</button></header>
     <nav class="convs" id="convs" aria-label="讨论列表"></nav>
+    <footer class="layouts">
+      <span id="layoutlabel">界面</span>
+      <div class="seg" role="group" aria-labelledby="layoutlabel">
+        <button data-layout="a" title="一条对话往下读，按阶段分段，总结最醒目">对话</button>
+        <button data-layout="b" title="同一阶段各位的发言并排成卡片，横着比">并排</button>
+        <button data-layout="c" title="问题下面先是结论，过程收成每人一行，点开看全文">简报</button>
+      </div>
+    </footer>
   </aside>
   <main>
-    <div class="top">
+    <header class="top">
+      <button class="icon" data-toggle-class="nav-toggled" aria-label="收起或展开讨论列表" title="讨论列表">☰</button>
       <div class="title" id="title">新讨论</div>
-      <div class="seatpick" id="seatpick"></div>
-      <div class="opts">
-        <label><input type="checkbox" id="web"> 上网</label>
-        <label title="GPT：codex priority；Claude：claude -p 需账号开了额外用量才生效，未开自动用标准速度"><input type="checkbox" id="fast"> fast</label>
-        <label>思考 <select id="effort"><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
-        <label title="你发问后，大家自动看彼此的发言互相回应几轮">自动讨论 <select id="rounds"><option value="0">0 轮</option><option value="1">1 轮</option><option value="2">2 轮</option><option value="3">3 轮</option></select></label>
-        <label title="讨论完自动让主持人总结，过程折叠起来"><input type="checkbox" id="autoSummary"> 自动总结</label>
-        <button class="link" id="toggleMore" aria-expanded="false">背景、角色和思考</button>
-      </div>
-    </div>
-    <div class="more" id="more" hidden>
-      <div class="row"><span>背景</span><textarea id="background" rows="3" placeholder="可选：每位参与者都会看到，比如你的约束、目标、已经定下的事"></textarea></div>
-      <div class="row"><span>主持人</span><select id="moderator"><option value="">自动（优先已勾选席位）</option></select><span></span></div>
-      <div id="personas"></div>
-      <div class="hint">角色留空 = 以模型本身的身份发言。思考选「跟随顶栏」就用顶栏的强度；主持人总结用所选主持人那一档。改动自动保存，从下一轮起生效。</div>
-    </div>
+      <button class="setbtn" id="toggleMore" aria-expanded="false" title="谁参加、每位的角色和思考强度、怎么讨论"></button>
+    </header>
+    <div class="strip" id="seatstrip" data-settings role="group" aria-label="参加的席位"></div>
     <div class="log" id="log" aria-live="polite"></div>
-    <div class="composer">
-      <textarea id="input" placeholder="说点什么。⌘ + Enter 发送"></textarea>
-      <div class="actions">
-        <button class="btn primary" id="send">发送</button>
-        <button class="btn" id="respond" title="每位看完别人刚才的发言后回应">互相回应</button>
-        <button class="btn" id="summary" title="由主持人整理共识、分歧、待你决定的问题">主持人总结</button>
-        <button class="btn" id="research" title="把输入框里的问题交给 GPT Researcher 调研，报告放进讨论给大家看">先调研</button>
-        <button class="btn rank" data-special="rank" title="找秩：主持人先把这件事下面的具体问题列成清单，各位找出最少几个独立的基本问题，再互相找反例和冗余。输入框空着时点它先填入模板，填好再点一次">找秩</button>
-        <button class="btn rank" data-special="book" title="三把尺读书：主持人先把书的观点列成清单，各位用贝叶斯、奥卡姆剃刀、万有理论重新梳理。输入框空着时点它先填入模板，填好再点一次">三把尺读书</button>
-        <button class="btn stop" id="stop" hidden>停止</button>
-        <span class="hint" id="cost"></span>
+    <footer class="composer">
+      <div class="box">
+        <textarea id="input" rows="2" placeholder="说点什么。⌘ + Enter 发送"></textarea>
+        <div class="bar">
+          <div class="quick">
+            <button class="chip prep" id="prepare" title="先让主持人根据你的问题起草背景和各席位角色，填好后可微调再开始圆桌">AI 填背景和角色</button>
+            <span class="sep" aria-hidden="true"></span>
+            <button class="chip" id="respond" title="每位看完别人刚才的发言后回应">互相回应</button>
+            <button class="chip" id="summary" title="由主持人整理共识、分歧、待你决定的问题">主持人总结</button>
+            <button class="chip" id="research" title="把输入框里的问题交给 GPT Researcher 调研，报告放进讨论给大家看">先调研</button>
+            <span class="sep" aria-hidden="true"></span>
+            <button class="chip mode" data-special="rank" title="找秩：主持人先把这件事下面的具体问题列成清单，各位找出最少几个独立的基本问题，再互相找反例和冗余。输入框空着时点它先填入模板，填好再点一次">找秩</button>
+            <button class="chip mode" data-special="book" title="三把尺读书：主持人先把书的观点列成清单，各位用贝叶斯、奥卡姆剃刀、万有理论重新梳理。输入框空着时点它先填入模板，填好再点一次">三把尺读书</button>
+          </div>
+          <button class="btn stop" id="stop" hidden>停止</button>
+          <button class="btn primary" id="send">发送<kbd>⌘↵</kbd></button>
+        </div>
       </div>
-    </div>
+      <div class="hint" id="cost"></div>
+    </footer>
   </main>
+  <aside id="more" data-settings aria-label="讨论设置">
+    <h3><span id="seathead"></span><button class="icon" id="closeMore" aria-label="关闭设置">✕</button></h3>
+    <div class="prepbox" id="prepbox" hidden></div>
+    <div id="seatlist"></div>
+    <h3>怎么讨论</h3>
+    <div class="opts">
+      <div class="tgs">
+        <label class="tg"><input type="checkbox" class="sw" id="web"><span>上网搜索</span></label>
+        <label class="tg" title="GPT：codex priority；Claude：claude -p 需账号开了额外用量才生效，未开自动用标准速度"><input type="checkbox" class="sw" id="fast"><span>fast 加速</span></label>
+        <label class="tg" title="讨论完自动让主持人总结，过程折叠起来"><input type="checkbox" class="sw" id="autoSummary"><span>自动总结</span></label>
+      </div>
+      <div class="flds">
+        <label class="fld"><span>思考强度</span><select id="effort"><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+        <label class="fld" title="你发问后，大家自动看彼此的发言互相回应几轮"><span>自动讨论</span><select id="rounds"><option value="0">不讨论</option><option value="1">1 轮</option><option value="2">2 轮</option><option value="3">3 轮</option></select></label>
+        <label class="fld" title="主持人负责定焦、列清单和总结，用哪个模型"><span>主持人模型</span><select id="moderator"></select></label>
+        <label class="fld" title="主持人定焦、列清单、总结时的思考强度；跟随 = 用这位席位自己的思考强度"><span>主持人思考</span><select id="moderatorEffort"></select></label>
+      </div>
+      <label class="fld"><span>背景（每位参与者都会看到）</span><textarea id="background" rows="3" placeholder="可选：你的约束、目标、已经定下的事"></textarea></label>
+    </div>
+    <p class="sethint" id="sethint"></p>
+    <h3>连接检查</h3>
+    <div class="probe" data-probe></div>
+  </aside>
 </div>
 
 <script>
@@ -171,10 +470,20 @@ marked.use({ renderer: {
 const md = s => marked.parse(String(s ?? ''));
 
 let META, conv = null, busy = false;
+let layout = document.documentElement.dataset.layout;   // 当前界面：a 对话 / b 并排 / c 简报
+const raw = {};                 // 正在生成的发言：已经收到的原文
+const store = new Map();        // id → 发言（已完成的和正在生成的）
+const live = new Set();         // 正在生成的发言 id
+const openState = new Map();    // 折叠块的展开状态，重画后保持
+let order = [];                 // 发言的显示顺序（按开始时间）
+let notices = [];               // 本场的临时报错
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const safeId = id => String(id ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
 const seatVar = id => `var(--seat-${safeId(id)}, var(--accent))`;
 const kindOf = m => m.kind ?? (m.rank ? 'rank' : null);
+const all = () => order.map(id => store.get(id)).filter(Boolean);
+const isOpen = (key, def = false) => openState.get(key) ?? def;
+const seatOrder = id => { const i = Object.keys(META.seats).indexOf(id); return i < 0 ? 99 : i; };
 
 function label(m) {
   if (m.role === 'user') return kindOf(m) ? `你 · ${META.special[kindOf(m)].label}` : '你';
@@ -187,7 +496,6 @@ function label(m) {
   if (m.role === 'moderator') return `主持人${suffix}`;
   return seatLabel || m.seat || '参与者';
 }
-
 function color(m) {
   if (m.role === 'user') return 'var(--user)';
   if (m.role === 'research') return 'var(--research)';
@@ -195,28 +503,20 @@ function color(m) {
   if (m.role === 'summary' || m.role === 'moderator') return 'var(--summary)';
   return seatVar(m.seat);
 }
+function avatar(m) {
+  const ch = m.role === 'user' ? '你' : m.role === 'research' ? '研' : m.role === 'helper' ? '助'
+    : m.role === 'summary' || m.role === 'moderator' ? '主' : String(m.seat || '?')[0].toUpperCase();
+  return `<span class="av" style="--c:${color(m)}" aria-hidden="true">${esc(ch)}</span>`;
+}
+const seatAvatar = id => avatar({ role: 'seat', seat: id });
 
 function applySeatStyles() {
   const rules = Object.entries(META.seats).map(([id, s]) => {
-    const key = safeId(id);
-    const c = s.color || '#2f5d50';
-    const dc = s.darkColor || c;
+    const key = safeId(id), c = s.color || '#2f5d50', dc = s.darkColor || c;
     return `:root { --seat-${key}: ${c}; } @media (prefers-color-scheme: dark) { :root { --seat-${key}: ${dc}; } }`;
   }).join('\n');
-  let style = document.getElementById('seat-colors');
-  if (!style) {
-    style = document.createElement('style');
-    style.id = 'seat-colors';
-    document.head.appendChild(style);
-  }
+  const style = document.getElementById('seat-colors') ?? document.head.appendChild(Object.assign(document.createElement('style'), { id: 'seat-colors' }));
   style.textContent = rules;
-}
-
-function updateComposerPlaceholder() {
-  const avail = Object.entries(META.seats).filter(([, s]) => s.available).map(([id]) => `@${id}`);
-  $('input').placeholder = avail.length
-    ? `说点什么。开头写 ${avail.join(' / ')} 只让这几位回答。⌘ + Enter 发送`
-    : '未检测到可用的本地模型 CLI，请先安装并登录 claude / codex / agy，或运行 --doctor 查看检测结果';
 }
 
 async function api(path, opts = {}) {
@@ -224,93 +524,245 @@ async function api(path, opts = {}) {
   const j = await r.json(); if (!r.ok) throw new Error(j.error ?? r.status); return j;
 }
 
+/* ---------- 连接检查：真的给每位发一句话，看能不能回 ---------- */
+// 装了命令行、且上次检查没失败，才默认请它参加
+const usable = id => !!META.seats[id]?.available && META.seats[id]?.probe?.ok !== false;
+let probeBusy = false, probeErr = '';
+function seatStatus(x) {
+  const p = x.probe;
+  if (!x.available) return { cls: 'bad', st: '✗', why: `没装 ${x.setup?.name ?? x.cli}`, fix: { what: `安装 ${x.setup?.name ?? x.cli}`, text: x.setup ? `${x.setup.install}，然后${x.setup.login}` : x.hint } };
+  if (probeBusy) return { cls: 'wait', st: '…', why: '正在测试' };
+  if (!p) return { cls: 'unk', st: '?', why: '还没测试' };
+  if (p.ok && p.fallbackFrom) return { cls: 'warn', st: '✓', why: `能用。账号用不了 ${p.fallbackFrom}，已改用账号默认模型` };
+  if (p.ok) return { cls: 'ok', st: '✓', why: `能用${p.ms ? `（${(p.ms / 1000).toFixed(1)} 秒）` : ''}` };
+  return { cls: 'bad', st: '✗', why: p.reason || '调用失败', fix: { what: p.reason, text: p.fix }, detail: p.detail };
+}
+// 修复说明里要敲的命令显示成代码样式，方便照着输入
+function codeify(text, setup) {
+  const cmds = [setup?.installCmd, setup?.loginCmd, '/login'].filter(Boolean).sort((a, b) => b.length - a.length);
+  const t = esc(text ?? '');
+  if (!cmds.length) return t;
+  const re = new RegExp(cmds.map(c => esc(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  return t.replace(re, m => `<code>${m}</code>`);
+}
+function probeHTML() {
+  const seats = Object.entries(META.seats);
+  const rows = seats.map(([id, x]) => ({ id, x, s: seatStatus(x) }));
+  const fixes = new Map();
+  for (const { x, s } of rows) if (s.fix) {
+    const key = `${x.cli}|${s.fix.text}`;
+    if (!fixes.has(key)) fixes.set(key, { ...s.fix, setup: x.setup, who: [] });
+    fixes.get(key).who.push(x.label);
+  }
+  const details = rows.filter(r => r.s.detail);
+  const tested = rows.some(r => r.x.probe);
+  const hint = probeBusy ? '正在给每位发一句很短的话，最长约 2 分钟。'
+    : probeErr ? `检查失败：${probeErr}`
+    : tested ? '只消耗很少的用量。装好或登录之后再测一次。'
+    : '给每位发一句很短的话，确认装好、登录了、模型能用。';
+  return `<div class="bar"><button class="chip" data-probe-run ${probeBusy ? 'disabled' : ''}>${probeBusy ? '正在测试…' : tested ? '重新测试' : '测试连接'}</button><span class="sethint">${esc(hint)}</span></div>
+    <ul>${rows.map(({ x, s }) => `<li class="${s.cls}"><span class="st" aria-hidden="true">${s.st}</span><span class="nm">${esc(x.label)}</span><span class="why">${esc(s.why)}</span></li>`).join('')}</ul>
+    ${fixes.size ? `<div class="fixes"><b>怎么修</b>${[...fixes.values()].map(f => `<div class="fix"><span>${esc(f.who.join('、'))}：${esc(f.what ?? '')}</span><span>${codeify(f.text, f.setup)}</span></div>`).join('')}</div>` : ''}
+    ${details.length ? `<details><summary>原始报错</summary><pre>${esc(details.map(r => `${r.x.label}：${r.s.detail}`).join('\n\n'))}</pre></details>` : ''}`;
+}
+const probeBad = () => Object.values(META.seats).some(x => seatStatus(x).cls === 'bad');
+function renderProbe() {
+  document.querySelectorAll('[data-probe]').forEach(el => {
+    el.innerHTML = probeHTML();
+    if (el.closest('.empty')) el.classList.toggle('bad', probeBad());
+  });
+}
+function setPlaceholder() {
+  const avail = Object.keys(META.seats).filter(usable).map(id => `@${id}`);
+  $('input').placeholder = avail.length
+    ? `说点什么。开头写 ${avail.slice(0, 2).join(' / ')} 这样的名字，只让这几位回答`
+    : '还没有能用的模型命令行。按上面「连接检查」的提示装好并登录 claude / codex / agy 中的任意一个';
+}
+async function runProbe() {
+  if (probeBusy) return;
+  probeBusy = true; probeErr = ''; renderProbe();
+  try {
+    const r = await api('/api/probe', { method: 'POST', body: {} });
+    META.seats = r.seats; META.defaults = r.defaults; META.probe = { ...META.probe, checked: true };
+    // 还没开始说话的讨论，参加的人跟着检查结果走：失败的先不请
+    if (conv && !conv.messages.length) {
+      conv.settings.seats = r.defaults.seats;
+      await api(`/api/convs/${conv.id}/settings`, { method: 'POST', body: { seats: conv.settings.seats } });
+    }
+  } catch (e) { probeErr = e.message; }
+  probeBusy = false;
+  setPlaceholder();
+  if (conv) { renderSettings(); if (!conv.messages.length) renderLog(); }
+  renderProbe();
+}
+
+/* ---------- 讨论列表 ---------- */
 const when = iso => { if (!iso) return ''; const d = new Date(iso), p = n => String(n).padStart(2, '0'); return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+function dayGroup(iso) {
+  const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(new Date()) - day(new Date(iso))) / 864e5);
+  return diff <= 0 ? '今天' : diff === 1 ? '昨天' : diff < 7 ? '近 7 天' : '更早';
+}
 async function listConvs() {
-  const list = await api('/api/convs');
-  $('convs').innerHTML = list.map(c => `<button class="conv ${conv?.id === c.id ? 'on' : ''}" data-id="${esc(c.id)}"><span class="t">${esc(c.title)}</span><span class="d">${esc(when(c.updated))} · ${c.n} 条</span></button>`).join('')
-    || '<div class="conv"><span class="d">还没有讨论</span></div>';
+  const list = await api('/api/convs'); let g = '';
+  $('convs').innerHTML = list.map(c => {
+    const d = dayGroup(c.updated), head = d !== g ? `<div class="grp">${g = d}</div>` : '';
+    return `${head}<button class="conv ${conv?.id === c.id ? 'on' : ''}" data-id="${esc(c.id)}"><span class="t">${esc(c.title)}</span><span class="d">${esc(when(c.updated))} · ${c.n} 条</span></button>`;
+  }).join('') || '<div class="grp">还没有讨论</div>';
   return list;
 }
-$('convs').addEventListener('click', e => { const b = e.target.closest('[data-id]'); if (b && !busy) open(b.dataset.id); });
-
+function resetLog() {
+  store.clear(); live.clear(); notices = [];
+  order = conv.messages.map(m => (store.set(m.id, m), m.id));
+}
 async function open(id) {
+  prepAc?.abort(); prepInfo = null;
   conv = await api(`/api/convs/${id}`);
   try { localStorage.setItem('live-rt.last', id); } catch {}
-  renderSettings(); renderLog(); listConvs(); subscribe(id);
+  resetLog(); renderSettings(); renderPrep(); renderLog(true); listConvs(); subscribe(id);
 }
 async function create() {
+  prepAc?.abort(); prepInfo = null;
   const prev = conv?.settings;
-  conv = await api('/api/convs', {
-    method: 'POST',
-    body: {
-      settings: prev ? {
-        seats: prev.seats.filter(id => META.seats[id]?.available),
-        web: prev.web,
-        fast: prev.fast,
-        rounds: prev.rounds,
-        autoSummary: prev.autoSummary,
-        moderator: prev.moderator ?? '',
-      } : {},
-    },
-  });
-  renderSettings(); renderLog(); listConvs(); subscribe(conv.id); $('input').focus();
+  conv = await api('/api/convs', { method: 'POST', body: { settings: prev ? {
+    seats: prev.seats.filter(usable), web: prev.web, fast: prev.fast,
+    rounds: prev.rounds, autoSummary: prev.autoSummary, moderator: prev.moderator ?? '', moderatorEffort: prev.moderatorEffort ?? '',
+  } : {} } });
+  resetLog(); renderSettings(); renderPrep(); renderLog(true); listConvs(); subscribe(conv.id); $('input').focus();
 }
-$('new').onclick = () => !busy && create();
 
+/* ---------- 设置 ---------- */
+const settingsSummary = s => [s.web && '上网', s.fast && 'fast', `思考 ${s.effort}`, s.rounds ? `讨论 ${s.rounds} 轮` : '不讨论', s.autoSummary && '自动总结'].filter(Boolean).join(' · ');
+const offTitle = x => !x.available ? ` title="${esc(x.hint || '未检测到对应 CLI')}"`
+  : x.probe?.ok === false ? ` title="${esc(`上次连接检查没通过：${x.probe.reason}。${x.probe.fix ?? ''}`)}"` : '';
+// 一位席位的一行：参加开关、角色、思考强度放在一起（界面 B 的参加开关在顶栏下那排席位里）
+function seatRowHTML(id, x, s, check) {
+  const on = x.available && s.seats.includes(id);
+  const sw = check ? `<input type="checkbox" class="sw" data-seat="${esc(id)}" ${on ? 'checked' : ''} ${x.available ? '' : 'disabled'} aria-label="${esc(x.label)} 参加">` : '';
+  const efforts = ['', ...EFFORTS].map(e => `<option value="${e}" ${(s.efforts?.[id] ?? '') === e ? 'selected' : ''}>${e ? '思考 ' + e : '思考 跟随'}</option>`).join('');
+  return `<div class="seatrow ${x.available ? '' : 'off'}" style="--c:${seatVar(id)}" data-presence="${esc(id)}"${offTitle(x)}>
+    <label class="who">${sw}${seatAvatar(id)}<span class="nm">${esc(x.label)}</span><span class="ps"></span></label>
+    <input class="persona" data-persona="${esc(id)}" value="${esc(s.personas?.[id] ?? '')}" placeholder="角色（可选），比如「唱反调，专挑风险」" aria-label="${esc(x.label)} 的角色">
+    <select data-effort="${esc(id)}" aria-label="${esc(x.label)} 的思考强度">${efforts}</select></div>`;
+}
+function renderSeats(s) {
+  const seats = Object.entries(META.seats), b = layout === 'b';
+  $('seatstrip').innerHTML = !b ? '' : seats.map(([id, x]) => `<label class="seat ${x.available ? '' : 'unavailable'}" style="--c:${seatVar(id)}" data-presence="${esc(id)}"${offTitle(x)}>
+    <input type="checkbox" data-seat="${esc(id)}" ${x.available && s.seats.includes(id) ? 'checked' : ''} ${x.available ? '' : 'disabled'}>${seatAvatar(id)}<span class="txt"><span class="nm">${esc(x.label)}</span><span class="ps"></span></span></label>`).join('');
+  $('seatlist').innerHTML = seats.map(([id, x]) => seatRowHTML(id, x, s, !b)).join('');
+}
+// 顶栏右边的设置按钮和设置面板的标题，随界面和当前设置变化
+function renderSetButton(s) {
+  const on = s.seats.filter(id => META.seats[id]?.available);
+  const stack = `<span class="stack">${on.map(id => `<span data-presence="${esc(id)}">${seatAvatar(id)}</span>`).join('') || '<span class="av" style="--c:var(--muted)">–</span>'}</span>`;
+  $('toggleMore').innerHTML = layout === 'a' ? `${stack}<span class="sum">${on.length} 位 · ${esc(settingsSummary(s))}</span><span class="chev" aria-hidden="true"></span>`
+    : layout === 'b' ? `<b>讨论设置</b><span class="sum">${esc(settingsSummary(s))}</span>`
+    : `${stack}<b>圆桌</b>`;
+  $('seathead').textContent = layout === 'a' ? '谁参加 · 角色 · 思考强度' : layout === 'b' ? '每位的角色和思考强度' : `圆桌 · ${on.length} 位参加`;
+  $('sethint').textContent = `${layout === 'b' ? '谁参加在上面那排席位里点。' : ''}角色留空 = 以模型本身的身份发言。改动自动保存，从下一轮起生效。`;
+}
 function renderSettings() {
   const s = conv.settings;
   $('title').textContent = conv.title;
-  $('seatpick').innerHTML = Object.entries(META.seats).map(([id, x]) => {
-    const checked = x.available && s.seats.includes(id);
-    const titleAttr = x.available ? '' : ` title="${esc(x.hint || '未检测到对应 CLI')}"`;
-    return `<label class="pill ${x.available ? '' : 'off'}" style="--c:${seatVar(id)}"${titleAttr}><input type="checkbox" data-seat="${esc(id)}" ${checked ? 'checked' : ''} ${x.available ? '' : 'disabled'}><span class="dot"></span>${esc(x.label)}</label>`;
-  }).join('');
-  $('web').checked = s.web;
-  $('fast').checked = s.fast;
-  $('effort').value = s.effort;
+  renderSeats(s);
+  $('web').checked = s.web; $('fast').checked = s.fast; $('effort').value = s.effort;
   $('rounds').value = String(s.rounds ?? META.defaults.rounds);
   $('autoSummary').checked = s.autoSummary ?? META.defaults.autoSummary;
   $('background').value = s.background ?? '';
-
-  const modOpts = ['<option value="">自动（优先已勾选席位）</option>'];
-  for (const [id, x] of Object.entries(META.seats)) {
-    if (x.available) modOpts.push(`<option value="${esc(id)}">${esc(x.label)}</option>`);
-  }
+  const modOpts = ['<option value="">自动（优先已选席位）</option>'];
+  for (const [id, x] of Object.entries(META.seats)) if (x.available) modOpts.push(`<option value="${esc(id)}">${esc(x.label)}</option>`);
   const curMod = s.moderator ?? '';
-  if (curMod && !META.seats[curMod]?.available) {
-    modOpts.push(`<option value="${esc(curMod)}">${esc(META.seats[curMod]?.label ?? curMod)}（当前不可用）</option>`);
-  }
-  $('moderator').innerHTML = modOpts.join('');
-  $('moderator').value = curMod;
-
-  $('personas').innerHTML = Object.entries(META.seats).map(([id, x]) => `<div class="row"><span>${esc(x.label)} 的角色</span><input data-persona="${esc(id)}" value="${esc(s.personas?.[id] ?? '')}" placeholder="可选，比如「唱反调，专挑风险」"><select data-effort="${esc(id)}" aria-label="${esc(x.label)} 的思考强度">${['', ...EFFORTS].map(e => `<option value="${e}" ${(s.efforts?.[id] ?? '') === e ? 'selected' : ''}>${e ? '思考 ' + e : '跟随顶栏'}</option>`).join('')}</select></div>`).join('');
-  updateCost();
+  if (curMod && !META.seats[curMod]?.available) modOpts.push(`<option value="${esc(curMod)}">${esc(META.seats[curMod]?.label ?? curMod)}（当前不可用）</option>`);
+  $('moderator').innerHTML = modOpts.join(''); $('moderator').value = curMod;
+  $('moderatorEffort').innerHTML = ['', ...EFFORTS].map(e => `<option value="${e}">${e || '跟随席位'}</option>`).join('');
+  $('moderatorEffort').value = s.moderatorEffort ?? '';
+  renderSetButton(s); updateCost(); presence(); renderProbe();
 }
-let saveTimer;
+let saveTimer = null;
 function saveSettings() {
   const seats = [...document.querySelectorAll('[data-seat]')].filter(x => !x.disabled && x.checked).map(x => x.dataset.seat);
   const personas = Object.fromEntries([...document.querySelectorAll('[data-persona]')].map(x => [x.dataset.persona, x.value]));
   const efforts = Object.fromEntries([...document.querySelectorAll('[data-effort]')].filter(x => x.value).map(x => [x.dataset.effort, x.value]));
   Object.assign(conv.settings, {
-    seats,
-    web: $('web').checked,
-    fast: $('fast').checked,
-    effort: $('effort').value,
-    efforts,
-    rounds: +$('rounds').value,
-    autoSummary: $('autoSummary').checked,
-    moderator: $('moderator').value,
-    background: $('background').value,
-    personas,
+    seats, personas, efforts,
+    web: $('web').checked, fast: $('fast').checked, effort: $('effort').value,
+    rounds: +$('rounds').value, autoSummary: $('autoSummary').checked,
+    moderator: $('moderator').value, moderatorEffort: $('moderatorEffort').value, background: $('background').value,
   });
+  renderSetButton(conv.settings); presence();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => api(`/api/convs/${conv.id}/settings`, { method: 'POST', body: conv.settings }), 400);
+  saveTimer = setTimeout(() => { saveTimer = null; api(`/api/convs/${conv.id}/settings`, { method: 'POST', body: conv.settings }); }, 400);
 }
-document.querySelector('.top').addEventListener('change', saveSettings);
-$('more').addEventListener('input', saveSettings);
-$('more').addEventListener('change', saveSettings);
-$('toggleMore').onclick = () => { const m = $('more'); m.hidden = !m.hidden; $('toggleMore').setAttribute('aria-expanded', String(!m.hidden)); };
+async function flushSettings() {
+  if (!saveTimer || !conv) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  await api(`/api/convs/${conv.id}/settings`, { method: 'POST', body: conv.settings });
+}
+// 设置面板的开合。界面 C 在宽屏上默认常驻右侧，其余情况默认收起、点外面或按 Esc 关掉
+const narrow = () => matchMedia('(max-width: 1100px)').matches;
+const docked = () => layout === 'c' && !narrow();
+function setOpen(on) {
+  document.body.classList.toggle('set-open', on);
+  $('toggleMore').setAttribute('aria-expanded', String(on));
+}
+function setLayout(l) {
+  layout = l;
+  document.documentElement.dataset.layout = l;
+  try { localStorage.setItem('live-rt.layout', l); } catch {}
+  document.querySelectorAll('button[data-layout]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.layout === l)));
+  setOpen(docked());
+  if (conv) { renderSettings(); renderLog(); }
+}
 
+// 每位席位现在在干什么：页面上带 data-presence 的元素都会跟着更新
+function seatState(id) {
+  for (const mid of live) { const m = store.get(mid); if (m?.seat === id && m.role === 'seat') return raw[mid] ? 'writing' : 'thinking'; }
+  return META.seats[id]?.available && conv.settings.seats.includes(id) ? 'idle' : 'off';
+}
+function presence() {
+  if (!conv) return;
+  document.querySelectorAll('[data-presence]').forEach(el => {
+    const id = el.dataset.presence, st = seatState(id);
+    el.dataset.state = st;
+    const t = el.querySelector('.ps');
+    if (t) t.textContent = { writing: '正在写', thinking: '思考中', idle: '', off: !META.seats[id]?.available ? '不可用' : META.seats[id]?.probe?.ok === false ? '连不上' : '不参加' }[st];
+  });
+}
+
+/* ---------- 把发言分成阶段和回合 ---------- */
+// 阶段：一组并行的发言（独立作答，或某一轮回应），前面可以带主持人的定焦问题。进行中的发言还没有 mode / round，归到当前阶段
+function phases(ms) {
+  const out = []; let cur = null;
+  for (const m of ms) {
+    if (m.role !== 'seat' && m.role !== 'moderator') { out.push({ type: m.role, m }); cur = null; continue; }
+    if (m.mode === 'inventory') { out.push({ type: 'inventory', m }); cur = null; continue; }
+    if (m.role === 'moderator') { cur = { type: 'round', round: m.round, respond: true, mod: m, seats: [] }; out.push(cur); continue; }
+    const respond = !!m.round || m.mode === 'respond' || m.mode === 'special-respond';
+    const fits = cur && !cur.seats.some(x => x.seat === m.seat) && (m.pending || (cur.respond === respond && (cur.round ?? 0) === (m.round ?? 0)));
+    if (!fits) { cur = { type: 'round', round: m.round, respond, mod: null, seats: [] }; out.push(cur); }
+    cur.seats.push(m);
+  }
+  return out;
+}
+const phaseTitle = p => !p.respond ? '独立作答' : (p.round ?? p.mod?.round) ? `第 ${p.round ?? p.mod.round} 轮回应` : '互相回应';
+// 回合：从你的一次发问开始，到主持人总结为止
+function turns(ms) {
+  const out = []; let t = null;
+  for (const p of phases(ms)) {
+    const head = p.type === 'user' || p.type === 'helper';
+    if (head || !t) { t = { head: head ? p.m : null, items: [], summary: null }; out.push(t); if (head) continue; }
+    if (p.type === 'summary') { t.summary = p.m; t = null; } else t.items.push(p);
+  }
+  return out;
+}
+const saidIn = t => t.items.flatMap(p => p.type === 'round' ? p.seats : []);
+function processLabel(t) {
+  const rounds = t.items.filter(p => p.type === 'round' && p.respond).length;
+  return `${saidIn(t).length} 条发言${rounds ? `，互相回应 ${rounds} 轮` : ''}`;
+}
+
+/* ---------- 发言的各个部分 ---------- */
 function metaLine(m) {
   const bits = [];
   if (m.mode === 'inventory') bits.push('只列不答');
@@ -324,91 +776,202 @@ function metaLine(m) {
   if (m.usd) bits.push(`$${m.usd.toFixed(3)}`);
   return bits.join(' · ');
 }
-function msgHTML(m) {
-  const sources = m.sources?.length ? `<details class="src"><summary>来源 ${m.sources.length}</summary><ul>${m.sources.map(s => `<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></li>`).join('')}</ul></details>` : '';
-  const pending = m.pending ? `<div class="status"><span class="spin"></span><span class="st">${m.role === 'research' ? '调研中，约 2 分钟' : '思考中'}</span><span class="tm" data-since="${m.at ? Date.parse(m.at) : Date.now()}"></span></div>` : '';
-  const copy = `<button class="copy" data-copy="${m.id}" title="复制这条发言的原文">复制</button>`;
-  return `<div class="msg ${m.role}" id="m-${m.id}" style="--c:${color(m)}">
-    <div class="who">${esc(label(m))}<span class="meta">${esc(metaLine(m))}</span>${copy}</div>
-    ${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}
-    ${m.text || !m.pending ? `<div class="body">${m.role === 'user' ? esc(m.text).replace(/\n/g, '<br>') : md(m.text)}</div>` : '<div class="body" hidden></div>'}
-    ${pending}${sources}<div class="foot">${copy}</div></div>`;
+const NEXT_RE = /^##\s*(下一层问题|深挖这处分歧)[^\n]*\n[\s\S]*?(?=^##\s|(?![\s\S]))/gm;
+const textOf = m => (m.pending ? raw[m.id] : m.text) ?? '';
+function bodyHTML(m, { trimNext } = {}) {
+  if (m.role === 'user') return esc(m.text).replace(/\n/g, '<br>');
+  return md(trimNext ? textOf(m).replace(NEXT_RE, '') : textOf(m));
 }
-const inRun = m => m?.role === 'seat' || m?.role === 'moderator';
-function logHTML(ms) {
-  const out = [];
-  for (let i = 0; i < ms.length; i++) {
-    if (!inRun(ms[i])) { out.push(msgHTML(ms[i])); continue; }
-    let j = i; while (j < ms.length && inRun(ms[j])) j++;
-    const run = ms.slice(i, j);
-    if (ms[j]?.role === 'summary') {
-      const said = run.filter(m => m.role === 'seat');
-      const rounds = Math.max(0, ...said.map(m => m.round ?? (m.mode === 'respond' ? 1 : 0)));
-      out.push(`<details class="process"><summary>讨论过程：${said.length} 条发言${rounds ? `，互相回应 ${rounds} 轮` : ''}</summary>${run.map(msgHTML).join('')}</details>`);
-    } else out.push(...run.map(msgHTML));
-    i = j - 1;
-  }
-  const last = ms.at(-1);
-  if (last?.role === 'summary' && !last.error) out.push(nextHTML(last.text));
-  return out.join('');
+const copyBtn = m => `<button class="copy" data-copy="${m.id}" title="复制这条发言的原文">复制</button>`;
+const kickHTML = m => `<div class="kick">${esc(label(m))}<span>${esc(when(m.at))}</span></div>`;
+const headHTML = m => `<div class="head">${avatar(m)}<span class="name">${esc(label(m))}</span><span class="meta">${esc(metaLine(m))}</span>${copyBtn(m)}</div>`;
+const isLong = (m, n) => m.text.length > n || m.text.includes('\n');
+function statusHTML(m) {
+  if (!m.pending) return '';
+  const st = m.status ?? (raw[m.id] ? '正在写' : m.role === 'research' ? '调研中，约 2 分钟' : '思考中');
+  return `<div class="status"><span class="spin"></span><span class="st">${esc(st)}</span><span class="tm" data-since="${m.at ? Date.parse(m.at) : Date.now()}"></span></div>`;
+}
+// 报错 + 正文 + 进行中状态 + 来源
+function partsHTML(m, opts) {
+  const sources = m.sources?.length ? `<details class="src"><summary>来源 ${m.sources.length}</summary><ul>${m.sources.map(s => `<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></li>`).join('')}</ul></details>` : '';
+  const show = textOf(m) || !m.pending;
+  return `${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}<div class="body md"${show ? '' : ' hidden'}>${bodyHTML(m, opts)}</div>${statusHTML(m)}${sources}`;
+}
+// 一句话摘要：正文的第一句（进行中取最新的一句）
+function excerpt(m) {
+  const t = textOf(m).replace(/[#*`>|]/g, '').split('\n').map(s => s.trim()).filter(Boolean);
+  return (m.pending ? t.at(-1) : t[0]) ?? '';
 }
 function section(text, name) {
   const m = String(text ?? '').match(new RegExp(`^##\\s*${name}[^\\n]*\\n([\\s\\S]*?)(?=^##\\s|(?![\\s\\S]))`, 'm'));
   const s = m?.[1].replace(/\*\*/g, '').replace(/^\s*[-*]\s+/, '').trim();
   return s && !/^「?无」?[。.]?$/.test(s) ? s : '';
 }
-function nextHTML(text) {
-  const q = section(text, '下一层问题'), d = section(text, '深挖这处分歧');
+// 按「## 小标题」把总结切成几块
+function sections(text) {
+  return String(text ?? '').split(/^(?=##\s)/m).map(part => {
+    const m = part.match(/^##\s*([^\n]*)\n?([\s\S]*)$/);
+    return m ? { title: m[1].trim(), body: m[2].trim() } : { title: '', body: part.trim() };
+  }).filter(s => s.title || s.body);
+}
+// 最后一条总结下面的快捷追问；有了它，总结正文里就不再重复这两段
+function nextHTML(m) {
+  if (busy || !m || m.pending || m.error || m !== all().at(-1)) return '';
+  const q = section(m.text, '下一层问题'), d = section(m.text, '深挖这处分歧');
   if (!q && !d) return '';
   return `<div class="next" id="next">
-    ${q ? `<button class="btn nq" data-ask="${esc(q)}"><b>接着问下一层</b><span>${esc(q)}</span></button>` : ''}
-    ${d ? `<button class="btn nq" data-ask="${esc(d)}"><b>深挖这处分歧</b><span>${esc(d)}</span></button>` : ''}
-    <button class="btn" data-more title="打开「背景、角色和思考」改某一位的角色，改好点「互相回应」">调整角色再议</button>
+    ${q ? `<button class="nq" data-ask="${esc(q)}"><b>接着问下一层</b><span>${esc(q)}</span></button>` : ''}
+    ${d ? `<button class="nq" data-ask="${esc(d)}"><b>深挖这处分歧</b><span>${esc(d)}</span></button>` : ''}
+    <button class="chip adjust" data-more title="改某一位的角色，改好点「互相回应」">调整角色再议</button>
   </div>`;
 }
-$('log').addEventListener('click', async e => {
-  const c = e.target.closest('.copy');
-  if (c) {
-    const id = c.dataset.copy;
-    const text = conv.messages.find(m => m.id === id)?.text || raw[id] || document.querySelector(`#m-${id} .body`)?.innerText || '';
-    try { await navigator.clipboard.writeText(text); }
-    catch { const t = document.createElement('textarea'); t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove(); }
-    document.querySelectorAll(`[data-copy="${id}"]`).forEach(x => { x.textContent = '已复制'; setTimeout(() => (x.textContent = '复制'), 1200); });
-    return;
-  }
-  const b = e.target.closest('.next button'); if (!b || busy) return;
-  if (b.dataset.ask) return turn('ask', b.dataset.ask);
-  $('more').hidden = false; $('toggleMore').setAttribute('aria-expanded', 'true'); document.querySelector('[data-persona]')?.focus();
-});
-function renderLog() {
-  if (conv.messages.length) {
-    $('log').innerHTML = logHTML(conv.messages);
-    scrollDown(true);
-    return;
-  }
-  const seats = Object.entries(META.seats);
-  const avail = seats.filter(([, s]) => s.available);
-  const missing = seats.filter(([, s]) => !s.available);
-  const missingWarn = !avail.length
-    ? `<div class="warnbox"><b>当前未检测到可用的模型 CLI</b><p>本工具通过你本机已登录的 CLI 工具并发调用模型，请先安装并登录以下任意工具后刷新页面：</p><ul>${missing.map(([, s]) => `<li>${esc(s.label)}：${esc(s.hint)}</li>`).join('')}</ul></div>`
-    : '';
-  const availNames = avail.map(([, s]) => s.label).join('、');
-  const researchLine = META.features?.research ? '需要先查资料时，也可以点「先调研」让 GPT Researcher 写一份带引用的报告放进讨论。' : '';
-  $('log').innerHTML = `<div class="empty">${missingWarn}<h2>想讨论什么？</h2>
-    <p>写下问题，顶栏勾选的席位会并行独立回答${avail.length ? `（当前可用：${esc(availNames)}）` : ''}。同一回合里各位彼此看不到发言，答完再一起展示。</p>
-    <p>之后可以接着追问，或用 @ 点名某一位；按顶栏「自动讨论」轮数，发问后大家会自动互相回应（每轮前主持人先抓出核心分歧定焦，无分歧则提前收束），最后由主持人总结，下方提供「接着问下一层」「深挖这处分歧」快捷追问，讨论过程默认折叠在总结之上。${esc(researchLine)}</p>
-    <p>两个特别模式，输入框空着时点按钮先填入模板，填好再点一次：「找秩」把一件事拆到最少几个彼此独立的基本问题；「三把尺读书」把一本书的观点列成清单，用贝叶斯、奥卡姆剃刀、万有理论重新梳理。</p></div>`;
-  scrollDown(true);
+const hasNext = m => !!nextHTML(m);
+function emptyHTML() {
+  const seats = Object.values(META.seats), avail = seats.filter(s => s.available);
+  const on = (conv?.settings.seats ?? []).filter(id => META.seats[id]?.available);
+  // 首次使用、一个能用的都没有、或者装了却连不上时，把连接检查放在最前面；只是没装某个命令行不算问题
+  const showProbe = !META.probe?.checked || probeBusy || !Object.keys(META.seats).some(usable)
+    || seats.some(x => x.available && x.probe?.ok === false);
+  const warn = !showProbe ? '' : `<section class="probe ${probeBad() ? 'bad' : ''}" data-probe aria-label="连接检查">${probeHTML()}</section>
+    ${avail.length ? '' : '<p class="sethint">本工具通过你电脑上已登录的模型命令行（claude / codex / agy）调用模型，至少装好并登录其中一个。</p>'}`;
+  return `<div class="empty">${warn}
+    <h2>想讨论什么？</h2>
+    <p class="lead">写下问题，${on.length ? `${on.length} 位` : '各位'}会各自独立作答，彼此看不到对方，答完一起展示。</p>
+    <ol class="how">
+      <li><b>独立作答</b><span>开头写 @名字，可以只点某几位</span></li>
+      <li><b>定焦与回应</b><span>主持人抓出核心分歧，大家互相回应</span></li>
+      <li><b>主持人总结</b><span>共识、分歧，和下一步该问的问题</span></li>
+    </ol>
+    <div class="modes">
+      <button class="modecard" data-special="rank"><b>找秩</b><span>把一件事拆到最少几个彼此独立的基本问题</span></button>
+      <button class="modecard" data-special="book"><b>三把尺读书</b><span>用贝叶斯、奥卡姆剃刀、万有理论重读一本书</span></button>
+    </div>
+    ${META.features?.research ? '<p class="sethint">需要先查资料时，点「先调研」让 GPT Researcher 写一份带引用的报告放进讨论。</p>' : ''}
+  </div>`;
 }
-function scrollDown(force) { const l = $('log'); if (force || l.scrollHeight - l.scrollTop - l.clientHeight < 160) l.scrollTop = l.scrollHeight; }
+
+/* ---------- 三种界面各自怎么画对话 ---------- */
+const VIEWS = {
+  // A 对话：一条往下读；有了总结，过程折叠成一行可以点开
+  a: {
+    q: m => `<div class="q ${isLong(m, 90) ? 'long' : ''}" id="m-${m.id}">${kickHTML(m)}<div class="text">${bodyHTML(m)}</div></div>`,
+    msg: m => `<div class="msg ${m.role}" id="m-${m.id}" style="--c:${color(m)}">${avatar(m)}<div class="main">
+      <div class="head"><span class="name">${esc(label(m))}</span><span class="meta">${esc(metaLine(m))}</span>${copyBtn(m)}</div>${partsHTML(m)}</div></div>`,
+    item(p) {
+      if (p.type !== 'round') return this.msg(p.m);
+      const who = p.respond ? `${p.seats.length} 位回应` : `${p.seats.length} 位，彼此看不到对方`;
+      return `<div class="phase"><b>${phaseTitle(p)}</b>${p.seats.length ? who : ''}</div>${p.mod ? this.msg(p.mod) : ''}${p.seats.map(this.msg).join('')}`;
+    },
+    log(ms) {
+      const out = [];
+      for (const t of turns(ms)) {
+        if (t.head) out.push(this.q(t.head));
+        const items = t.items.map(p => this.item(p)).join(''), s = t.summary;
+        if (s && !s.pending && !s.error && saidIn(t).length) {
+          const key = `proc:${s.id}`, faces = [...new Set(saidIn(t).map(m => m.seat))].map(seatAvatar).join('');
+          out.push(`<details class="process" data-key="${key}" ${isOpen(key) ? 'open' : ''}><summary><span class="stack">${faces}</span>讨论过程：${processLabel(t)}</summary><div class="thread">${items}</div></details>`);
+        } else out.push(items);
+        if (s) out.push(`<div class="sumcard" id="m-${s.id}">${headHTML(s)}${partsHTML(s, { trimNext: hasNext(s) })}</div>`, nextHTML(s));
+      }
+      return `<div class="thread">${out.join('')}</div>`;
+    },
+  },
+  // B 并排：每个阶段一排卡片，每位的位置固定；卡片太长就截住，可以展开
+  b: {
+    q: m => `<div class="q ${isLong(m, 120) ? 'long' : ''}" id="m-${m.id}">${kickHTML(m)}<div class="text">${bodyHTML(m)}</div></div>`,
+    focus: m => `<div class="focus" id="m-${m.id}">${headHTML(m)}${partsHTML(m)}</div>`,
+    block: m => `<div class="block ${m.role}" id="m-${m.id}" style="--c:${color(m)}">${headHTML(m)}${partsHTML(m)}</div>`,
+    card(m, allOpen) {
+      const open = allOpen || isOpen(`card:${m.id}`);
+      return `<div class="card ${open ? 'open' : ''} ${m.pending ? 'pending' : ''}" id="m-${m.id}" style="--c:${color(m)}">
+        <div class="card-h">${avatar(m)}<div class="who"><span class="name">${esc(label(m))}</span><span class="meta">${esc(metaLine(m))}</span></div>${copyBtn(m)}</div>
+        ${partsHTML(m)}${allOpen ? '' : `<button class="link more" data-toggle="card:${m.id}">${open ? '收起' : '展开全文'}</button>`}</div>`;
+    },
+    band(p, n) {
+      const key = `band:${p.mod?.id ?? p.seats[0]?.id}`, allOpen = isOpen(key);
+      const seats = [...p.seats].sort((a, b) => seatOrder(a.seat) - seatOrder(b.seat));
+      const who = !seats.length ? '主持人正在定这一轮的问题' : p.respond ? `${seats.length} 位回应` : `${seats.length} 位，彼此看不到对方`;
+      return `<div class="band"><div class="band-h"><span class="num">${n}</span><b>${phaseTitle(p)}</b><span class="muted">${who}</span>${seats.length ? `<button class="link" data-toggle="${key}">${allOpen ? '全部收起' : '全部展开'}</button>` : ''}</div>
+        ${p.mod ? this.focus(p.mod) : ''}<div class="cols">${seats.map(m => this.card(m, allOpen)).join('')}</div></div>`;
+    },
+    // 总结拆成几块：第一块（回答）单独放大，其余并排
+    sum(m) {
+      const secs = m.pending ? [] : sections(hasNext(m) ? m.text.replace(NEXT_RE, '') : m.text);
+      const board = secs.length > 1 && secs[0].title
+        ? `${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}<div class="lead md">${md(secs[0].body)}</div><div class="sumgrid">${secs.slice(1).map(s => `<section><h4>${esc(s.title)}</h4><div class="md">${md(s.body)}</div></section>`).join('')}</div>`
+        : partsHTML(m);
+      return `<div class="sumboard" id="m-${m.id}">${headHTML(m)}${board}</div>`;
+    },
+    log(ms) {
+      return turns(ms).map(t => {
+        let n = 0;
+        const items = t.items.map(p => p.type === 'round' ? this.band(p, ++n) : p.type === 'inventory' ? this.focus(p.m) : this.block(p.m)).join('');
+        return `<section class="turn">${t.head ? this.q(t.head) : ''}${items}${t.summary ? this.sum(t.summary) + nextHTML(t.summary) : ''}</section>`;
+      }).join('');
+    },
+    after() {
+      document.querySelectorAll('.card').forEach(c => {
+        const b = c.querySelector('.body'); if (!b) return;
+        if (c.classList.contains('pending')) { b.scrollTop = b.scrollHeight; return; }
+        if (c.classList.contains('open')) { c.classList.add('wasclamped'); return; }
+        c.classList.toggle('clamped', b.scrollHeight > b.clientHeight + 4);
+      });
+    },
+    delta(id) { const b = document.querySelector(`#m-${id}.card .body`); if (b) b.scrollTop = b.scrollHeight; },   // 进行中的卡片跟着最新一行走
+  },
+  // C 简报：问题、进度、结论在前；过程里每人一行（谁、第一句话、用时），点开看全文
+  c: {
+    q: m => `<header class="qh ${isLong(m, 90) ? 'long' : ''}" id="m-${m.id}">${kickHTML(m)}<h2>${bodyHTML(m)}</h2></header>`,
+    steps(t) {
+      const st = t.items.filter(p => p.type === 'round').map(p => ({ label: phaseTitle(p), n: p.seats.filter(m => !m.pending).length, of: p.seats.length, live: !!p.mod?.pending || p.seats.some(m => m.pending) }));
+      if (t.summary) st.push({ label: '主持人总结', of: 1, live: t.summary.pending });
+      return st.length ? `<ol class="steps">${st.map(s => `<li class="${s.live ? 'live' : ''}">${s.label}${s.of > 1 ? `<span>${s.n}/${s.of}</span>` : ''}</li>`).join('')}</ol>` : '';
+    },
+    brief: m => `<div class="brief ${/^\s*##\s*回答/.test(textOf(m)) ? 'ans' : ''}" id="m-${m.id}">${headHTML(m)}${partsHTML(m, { trimNext: hasNext(m) })}</div>`,
+    row(m, open) {
+      const key = `row:${m.id}`, name = m.role === 'moderator' && m.mode !== 'inventory' ? '主持人' : label(m);
+      const time = m.pending ? `<span class="tm" data-since="${Date.parse(m.at)}"></span>` : m.ms ? `${(m.ms / 1000).toFixed(0)} 秒` : '';
+      return `<details class="row ${m.role}" id="m-${m.id}" data-key="${key}" style="--c:${color(m)}" ${isOpen(key, open) ? 'open' : ''}>
+        <summary>${avatar(m)}<span class="name">${esc(name)}</span><span class="ex">${esc(excerpt(m) || (m.pending ? '思考中…' : m.error ?? ''))}</span><span class="meta">${time}</span></summary>
+        <div class="full">${partsHTML(m)}${m.pending ? '' : copyBtn(m)}</div></details>`;
+    },
+    proc(t, open) {
+      const rows = t.items.map(p => p.type !== 'round' ? this.row(p.m, open)
+        : `<div class="ph"><b>${phaseTitle(p)}</b>${p.seats.length ? `${p.seats.length} 位` : ''}</div>${p.mod ? this.row(p.mod, open) : ''}${p.seats.map(m => this.row(m, open)).join('')}`).join('');
+      return rows ? `<section class="proc">${t.summary ? `<h3>讨论过程 · ${processLabel(t)}</h3>` : ''}${rows}</section>` : '';
+    },
+    log(ms) {
+      const ts = turns(ms);
+      return ts.map((t, i) => {
+        // 没有总结、也不在进行中：发言直接摊开；否则每人收成一行
+        const open = !t.summary && !(busy && i === ts.length - 1);
+        return `<article class="turn">${t.head ? this.q(t.head) : '<div class="kick">接着讨论</div>'}${this.steps(t)}
+          ${t.summary ? this.brief(t.summary) + nextHTML(t.summary) : ''}${this.proc(t, open)}</article>`;
+      }).join('');
+    },
+    delta(id) { const ex = document.querySelector(`#m-${id} > summary .ex`); if (ex) ex.textContent = excerpt(store.get(id)); },
+    summaryAnchor: m => document.getElementById(`m-${m.id}`)?.closest('.turn'),
+  },
+};
+
+/* ---------- 画对话 ---------- */
+function renderLog(toEnd) {
+  const l = $('log'), near = l.scrollHeight - l.scrollTop - l.clientHeight < 160, top = l.scrollTop;
+  const ms = all(), view = VIEWS[layout];
+  l.innerHTML = (ms.length ? view.log(ms) : emptyHTML()) + notices.map(t => `<div class="notice"><div class="err">${esc(t)}</div></div>`).join('');
+  view.after?.();
+  if (busy) l.querySelectorAll('[data-special]').forEach(x => (x.disabled = true));
+  l.scrollTop = toEnd || near ? l.scrollHeight : top;
+  presence();
+}
 function updateCost() {
   const usd = conv.messages.reduce((s, m) => s + (m.usd ?? 0), 0);
   $('cost').textContent = usd ? `这场讨论的花费约 $${usd.toFixed(2)}（调研员；本地 CLI 订阅不计美元）` : '';
 }
 setInterval(() => document.querySelectorAll('.tm[data-since]').forEach(t => (t.textContent = `${Math.round((Date.now() - t.dataset.since) / 1000)} 秒`)), 500);
 
+/* ---------- 实时事件 ---------- */
 let es = null;
-const raw = {};
 function subscribe(id) {
   es?.close();
   es = new EventSource(`/api/convs/${id}/events`);
@@ -419,69 +982,215 @@ function handle(e) {
     setBusy(e.on);
     if (!e.on) {
       updateCost(); listConvs();
-      if (conv.messages.at(-1)?.role === 'summary') { renderLog(); document.getElementById(`m-${conv.messages.at(-1).id}`)?.scrollIntoView({ block: 'start' }); }
+      const last = all().at(-1);
+      if (last?.role === 'summary') (VIEWS[layout].summaryAnchor?.(last) ?? document.getElementById(`m-${last.id}`))?.scrollIntoView({ block: 'start' });
     }
   }
   if (e.type === 'conv') { conv.title = e.conv.title; $('title').textContent = e.conv.title; }
-  if (e.type === 'start') { if (document.getElementById(`m-${e.msg.id}`)) return; raw[e.msg.id] = e.msg.text ?? ''; if (!conv.messages.length) $('log').innerHTML = ''; $('log').insertAdjacentHTML('beforeend', msgHTML(e.msg)); scrollDown(true); }
+  if (e.type === 'start') {
+    if (store.has(e.msg.id)) return;
+    store.set(e.msg.id, e.msg); order.push(e.msg.id); raw[e.msg.id] = e.msg.text ?? '';
+    if (e.msg.pending) live.add(e.msg.id);
+    renderLog(true);
+  }
   if (e.type === 'delta') {
+    const first = !raw[e.id];
     raw[e.id] = (raw[e.id] ?? '') + e.text;
     const b = document.querySelector(`#m-${e.id} .body`); if (!b) return;
     b.hidden = false; b.innerHTML = md(raw[e.id]);
+    const m = store.get(e.id); if (m) delete m.status;
     const st = document.querySelector(`#m-${e.id} .st`); if (st) st.textContent = '正在写';
-    scrollDown();
+    if (first) presence();
+    VIEWS[layout].delta?.(e.id);
+    const l = $('log'); if (l.scrollHeight - l.scrollTop - l.clientHeight < 160) l.scrollTop = l.scrollHeight;
   }
-  if (e.type === 'status') { const st = document.querySelector(`#m-${e.id} .st`); if (st) st.textContent = e.text; }
+  if (e.type === 'status') {
+    const m = store.get(e.id); if (m) m.status = e.text;
+    const st = document.querySelector(`#m-${e.id} .st`); if (st) st.textContent = e.text;
+  }
   if (e.type === 'done') {
-    if (!conv.messages.length) $('log').innerHTML = '';
+    live.delete(e.msg.id); store.set(e.msg.id, e.msg);
+    if (!order.includes(e.msg.id)) order.push(e.msg.id);
     if (!conv.messages.some(m => m.id === e.msg.id)) conv.messages.push(e.msg);
-    const el = document.getElementById(`m-${e.msg.id}`);
-    if (el) el.outerHTML = msgHTML(e.msg); else $('log').insertAdjacentHTML('beforeend', msgHTML(e.msg));
-    scrollDown(e.msg.role !== 'seat');
+    renderLog(e.msg.role !== 'seat');
   }
-  if (e.type === 'error') $('log').insertAdjacentHTML('beforeend', `<div class="msg"><div class="err">${esc(e.text)}</div></div>`);
+  if (e.type === 'error') { notices.push(e.text); renderLog(true); }
 }
 
+/* ---------- AI 配局：开聊前先让主持人起草背景和各席位角色 ---------- */
+let prepBusy = false, prepAc = null, prepInfo = null;
+function renderPrep() {
+  const box = $('prepbox');
+  if (!box) return;
+  if (prepBusy) {
+    box.hidden = false;
+    box.innerHTML = `<div class="head"><span class="spin"></span><b>正在起草背景和角色…</b><button class="chip" data-prep-cancel style="margin-left:auto">取消</button></div>
+      <div class="sethint">主持人正在按你的问题梳理背景约束，并为当前参加的席位分配互补视角。</div>`;
+    return;
+  }
+  if (!prepInfo || prepInfo.convId !== conv?.id) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  const modLabel = META.seats[prepInfo.seat]?.label ?? prepInfo.seat;
+  const sec = prepInfo.ms ? ` · ${(prepInfo.ms / 1000).toFixed(1)} 秒` : '';
+  const miss = prepInfo.missing?.length
+    ? `<div class="sethint">建议在下方「背景」里顺手补上：</div><ul class="miss">${prepInfo.missing.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`
+    : '<div class="sethint">下面已填好各席位角色和背景，你可以直接修改，满意后开始讨论。</div>';
+  box.hidden = false;
+  box.innerHTML = `<div class="head"><b>已由 ${esc(modLabel)} 填好背景和角色${esc(sec)}</b><button class="icon" data-prep-close aria-label="收起提示">✕</button></div>
+    ${miss}
+    <div class="acts"><button class="btn primary" data-prep-start>直接开始圆桌</button><button class="chip" data-prep-undo>撤销填充</button></div>`;
+}
+function flashPrepFields(personaIds) {
+  const els = [$('background'), ...personaIds.map(id => document.querySelector(`[data-persona="${safeId(id)}"]`))].filter(Boolean);
+  els.forEach(el => el.classList.add('prep-flash'));
+  setTimeout(() => els.forEach(el => el.classList.remove('prep-flash')), 1600);
+}
+async function prepareRoundtable() {
+  if (busy || prepBusy || !conv) return;
+  const text = $('input').value.trim();
+  if (!text) {
+    $('input').focus();
+    notices = ['先在输入框写下你想讨论的问题，再点「AI 填背景和角色」。'];
+    renderLog(true);
+    return;
+  }
+  notices = [];
+  await flushSettings();
+  const prev = {
+    background: conv.settings.background ?? '',
+    personas: { ...(conv.settings.personas ?? {}) },
+  };
+  prepBusy = true;
+  prepInfo = null;
+  prepAc = new AbortController();
+  syncButtons();
+  renderPrep();
+  try {
+    const r = await api(`/api/convs/${conv.id}/prepare`, {
+      method: 'POST',
+      body: { text },
+      signal: prepAc.signal,
+    });
+    conv.settings = r.settings;
+    prepInfo = { seat: r.seat, ms: r.ms, missing: r.missing ?? [], prev, convId: conv.id };
+    renderSettings();
+    setOpen(true);
+    $('more').scrollTop = 0;
+    flashPrepFields(Object.keys(r.personas ?? {}));
+  } catch (err) {
+    if (err.name !== 'AbortError') { notices.push(`AI 配局失败：${err.message}`); renderLog(true); }
+  } finally {
+    prepBusy = false;
+    prepAc = null;
+    syncButtons();
+    renderPrep();
+  }
+}
+async function undoPrepare() {
+  if (!prepInfo || prepInfo.convId !== conv?.id || busy || prepBusy) return;
+  conv.settings.background = prepInfo.prev.background;
+  conv.settings.personas = { ...prepInfo.prev.personas };
+  prepInfo = null;
+  renderSettings();
+  renderPrep();
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  await api(`/api/convs/${conv.id}/settings`, { method: 'POST', body: conv.settings });
+}
+
+/* ---------- 发言 ---------- */
 async function turn(mode, preset) {
-  if (busy) return;
+  if (busy || prepBusy) return;
   const text = preset ?? $('input').value.trim();
   const typed = mode === 'ask' || mode === 'research' || !!META.special[mode];
   if (typed && !text) { $('input').focus(); return; }
-  if (!preset && typed) $('input').value = '';
+  await flushSettings();
+  if (prepInfo) { prepInfo = null; renderPrep(); }
+  if (!preset && typed) { $('input').value = ''; grow(); }
   setBusy(true);
   try { await api(`/api/convs/${conv.id}/say`, { method: 'POST', body: { mode, text } }); }
-  catch (err) { $('log').insertAdjacentHTML('beforeend', `<div class="msg"><div class="err">${esc(err.message)}</div></div>`); setBusy(false); }
+  catch (err) { notices.push(err.message); setBusy(false); }
+}
+function syncButtons() {
+  const locked = busy || prepBusy;
+  for (const id of ['send', 'respond', 'summary', 'research', 'new', 'prepare']) $(id).disabled = locked;
+  document.querySelectorAll('[data-special]').forEach(x => (x.disabled = locked));
+  $('prepare').textContent = prepBusy ? '正在配局…' : 'AI 填背景和角色';
+  $('stop').hidden = !locked;
 }
 function setBusy(b) {
+  const changed = busy !== b;
   busy = b;
-  for (const id of ['send', 'respond', 'summary', 'research', 'new']) $(id).disabled = b;
-  document.querySelectorAll('[data-special]').forEach(x => (x.disabled = b));
-  if (b) $('next')?.remove();
-  $('stop').hidden = !b;
+  syncButtons();
+  if (changed && conv) renderLog();
 }
+function grow() { const i = $('input'); i.style.height = 'auto'; i.style.height = `${Math.min(i.scrollHeight, innerHeight * .4)}px`; }
+// 找秩 / 三把尺读书：输入框空着时先填入模板，填好再点一次才发出
+function special(kind) {
+  if (busy || prepBusy) return;
+  const i = $('input');
+  if (i.value.trim()) return turn(kind);
+  i.value = META.special[kind].template.trim(); grow();
+  const at = i.value.indexOf('：') + 1;
+  i.focus(); i.setSelectionRange(at, at);
+}
+
+$('convs').addEventListener('click', e => { const b = e.target.closest('[data-id]'); if (b && !busy && !prepBusy) { open(b.dataset.id); document.body.classList.remove('nav-toggled'); } });
+$('new').onclick = () => !busy && !prepBusy && create();
+for (const type of ['change', 'input']) document.addEventListener(type, e => { if (e.target.closest('[data-settings]')) saveSettings(); });
+$('toggleMore').onclick = () => setOpen(!document.body.classList.contains('set-open'));
+$('closeMore').onclick = () => setOpen(false);
+$('log').addEventListener('pointerdown', () => { if (!docked()) setOpen(false); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !docked()) setOpen(false); });
+$('prepare').onclick = () => prepareRoundtable();
 $('send').onclick = () => turn('ask');
 $('respond').onclick = () => turn('respond');
 $('summary').onclick = () => turn('summary');
 $('research').onclick = () => turn('research');
-document.querySelectorAll('[data-special]').forEach(b => (b.onclick = () => {
-  const i = $('input');
-  if (i.value.trim()) return turn(b.dataset.special);
-  i.value = META.special[b.dataset.special].template.trim();
-  const at = i.value.indexOf('：') + 1;
-  i.focus(); i.setSelectionRange(at, at);
-}));
-$('stop').onclick = () => api(`/api/convs/${conv.id}/stop`, { method: 'POST' });
+$('stop').onclick = () => { if (prepAc) return prepAc.abort(); api(`/api/convs/${conv.id}/stop`, { method: 'POST' }); };
+$('input').addEventListener('input', grow);
 $('input').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); turn('ask'); } });
+document.addEventListener('click', async e => {
+  const t = e.target;
+  const c = t.closest('[data-copy]');
+  if (c) {
+    e.preventDefault();
+    const id = c.dataset.copy, text = store.get(id)?.text || raw[id] || '';
+    try { await navigator.clipboard.writeText(text); }
+    catch { const a = document.createElement('textarea'); a.value = text; document.body.append(a); a.select(); document.execCommand('copy'); a.remove(); }
+    document.querySelectorAll(`[data-copy="${id}"]`).forEach(x => { x.textContent = '已复制'; setTimeout(() => (x.textContent = '复制'), 1200); });
+    return;
+  }
+  if (t.closest('[data-probe-run]')) return runProbe();
+  if (t.closest('[data-prep-cancel]')) return prepAc?.abort();
+  if (t.closest('[data-prep-close]')) { prepInfo = null; return renderPrep(); }
+  if (t.closest('[data-prep-undo]')) return undoPrepare();
+  if (t.closest('[data-prep-start]')) { if (!docked()) setOpen(false); return turn('ask'); }
+  const lay = t.closest('button[data-layout]'); if (lay) return setLayout(lay.dataset.layout);
+  const sp = t.closest('[data-special]'); if (sp) return special(sp.dataset.special);
+  const tg = t.closest('[data-toggle]'); if (tg) { openState.set(tg.dataset.toggle, !isOpen(tg.dataset.toggle)); return renderLog(); }
+  const sum = t.closest('details[data-key] > summary'); if (sum) return void openState.set(sum.parentElement.dataset.key, !sum.parentElement.open);
+  const cls = t.closest('[data-toggle-class]'); if (cls) return void document.body.classList.toggle(cls.dataset.toggleClass);
+  const ask = t.closest('[data-ask]'); if (ask && !busy) return turn('ask', ask.dataset.ask);
+  if (t.closest('[data-more]')) { setOpen(true); document.querySelector('[data-persona]')?.focus(); }
+});
 
 (async () => {
+  setLayout(layout);
   META = await api('/api/meta');
   if (!META.features?.research) $('research').hidden = true;
   applySeatStyles();
-  updateComposerPlaceholder();
+  setPlaceholder();
   const list = await listConvs();
   let last = null; try { last = localStorage.getItem('live-rt.last'); } catch {}
   const pick = list.find(c => c.id === last) ?? list[0];
   if (pick) await open(pick.id); else await create();
+  setTimeout(() => document.body.classList.add('ready'), 100);
+  // 第一次用：自动检查一遍，装了却没登录、模型用不了的，开讨论前就能看到怎么修
+  if (!META.probe?.checked && Object.values(META.seats).some(s => s.available)) runProbe();
 })();
 </script>
 </body>

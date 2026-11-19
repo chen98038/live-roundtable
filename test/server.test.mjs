@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createSay, loadSeats } from '../src/seats.mjs';
+import { classifyError, createSay, loadSeats, probeSeat } from '../src/seats.mjs';
 import { createRoundtableServer } from '../src/server.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -64,6 +64,15 @@ test('缺失部分 CLI 时 /api/meta 正确标记可用席位，且本地静态�
 
     const markedHeadRes = await fetch(`${srv.baseUrl}/vendor/marked.min.js`, { method: 'HEAD' });
     assert.equal(markedHeadRes.status, 200);
+
+    for (const font of ['Montserrat-subset.woff2', 'NotoSansSC-subset.woff2']) {
+      assert.match(html, new RegExp(`/vendor/fonts/${font.replace('.', '\\.')}`));
+      const fontRes = await fetch(`${srv.baseUrl}/vendor/fonts/${font}`);
+      assert.equal(fontRes.status, 200);
+      assert.equal(fontRes.headers.get('content-type'), 'font/woff2');
+      assert.equal(Buffer.from(await fontRes.arrayBuffer()).subarray(0, 4).toString(), 'wOF2');
+    }
+    assert.equal((await fetch(`${srv.baseUrl}/vendor/fonts/OFL-Montserrat.txt`)).status, 404);
 
     const metaRes = await fetch(`${srv.baseUrl}/api/meta`);
     assert.equal(metaRes.status, 200);
@@ -157,6 +166,49 @@ test('Opus 不可用时自动切换可用席位任主持人，并完成独立回
   }
 });
 
+test('主持人可单独指定模型和思考强度，不影响参与者的思考强度', async () => {
+  const tmpData = mkdtempSync(join(tmpdir(), 'rt-mod-test-'));
+  const findBinFn = cmd => (cmd === 'claude' || cmd === 'codex' ? `/mock/bin/${cmd}` : null);
+  const calls = [];
+  const ok = text => ({ text, ms: 5, usage: null, usd: 0, speed: 'standard', sources: [], searches: [], error: null });
+  const sayFn = async (seatId, opts) => {
+    const role = opts.system.includes('中立主持人') ? 'summary' : opts.system.includes('只负责让讨论往深处走') ? 'moderator' : 'seat';
+    calls.push({ seatId, role, effort: opts.effort });
+    return ok(role === 'moderator' ? '【无分歧】已经说清楚了' : role === 'summary' ? '## 回答\n好' : `MOCK_${seatId}`);
+  };
+  const srv = await startTestServer({ dataDir: tmpData, findBinFn, sayFn });
+  try {
+    const conv = await (await fetch(`${srv.baseUrl}/api/convs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ settings: {} }),
+    })).json();
+    assert.equal(conv.settings.moderatorEffort, '');
+
+    const setRes = await fetch(`${srv.baseUrl}/api/convs/${conv.id}/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ seats: ['opus', 'astra'], moderator: 'sol', moderatorEffort: 'max', efforts: { astra: 'low' }, rounds: 1, autoSummary: true }),
+    });
+    assert.equal(setRes.status, 200);
+
+    await fetch(`${srv.baseUrl}/api/convs/${conv.id}/say`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'ask', text: '先做哪个？' }),
+    });
+    for (let i = 0; i < 50 && !calls.some(c => c.role === 'summary'); i++) await new Promise(r => setTimeout(r, 20));
+
+    assert.deepEqual(
+      calls.map(c => [c.seatId, c.role, c.effort]).sort(),
+      [['astra', 'seat', 'low'], ['opus', 'seat', 'high'], ['sol', 'moderator', 'max'], ['sol', 'summary', 'max']],
+    );
+  } finally {
+    await srv.close();
+    rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
 test('特别模式「找秩」走通清单→作答→无分歧提前收束→总结', async () => {
   const tmpData = mkdtempSync(join(tmpdir(), 'rt-rank-test-'));
   const findBinFn = cmd => (cmd === 'claude' || cmd === 'codex' ? `/mock/bin/${cmd}` : null);
@@ -231,6 +283,204 @@ test('支持自定义 seats.json 覆盖与停用席位，缺失 CLI 时 createSa
     assert.equal(res.text, '');
     assert.match(res.error, /未检测到 claude 命令/);
   } finally {
+    rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
+test('连接自检：把各家 CLI 的真实报错归类，并给出修复步骤', () => {
+  const cases = [
+    ['claude', 'Not logged in · Please run /login', 'login', /\/login/],
+    ['codex', 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses', 'login', /codex login/],
+    ['agy', 'authentication failed or timed out', 'login', /agy/],
+    ['claude', "There's an issue with the selected model (claude-no-such). It may not exist or you may not have access to it.", 'model', /默认模型/],
+    ['codex', "The 'gpt-no-such-model' model is not supported when using Codex with a ChatGPT account.", 'model', /默认模型/],
+    ['agy', 'invalid model selection (--model "gemini-no-such" --effort "low"): --effort is not supported for model "gemini-no-such"', 'model', /默认模型/],
+    ['codex', "error: unexpected argument '--ignore-user-config' found", 'version', /0\.169.*npm install -g @openai\/codex/],
+    ['agy', 'failed to start conversation: backend returned an empty conversation id', 'transient', /稍后/],
+    ['codex', 'request id: req_aba401cd 连接失败 fetch failed', 'network', /网络/],
+    ['claude', '超时：120 秒没有回复', 'timeout', /稍后/],
+    ['claude', '一个没见过的错误', 'other', /原始报错/],
+  ];
+  for (const [cli, msg, kind, fix] of cases) {
+    const c = classifyError(cli, msg);
+    assert.equal(c.kind, kind, msg);
+    assert.match(c.fix, fix, msg);
+  }
+});
+
+test('连接自检：没装、能用、模型用不了自动退回默认模型、偶发错误重试一次、超时', async () => {
+  const seat = { cli: 'codex', vendor: 'openai', model: 'gpt-6.2-sol', label: 'sol' };
+  const has = () => '/mock/codex';
+
+  const missing = await probeSeat(seat, { findBinFn: () => null });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.kind, 'missing');
+  assert.match(missing.fix, /npm install -g @openai\/codex/);
+
+  const ok = await probeSeat(seat, { findBinFn: has, runFn: async () => ({ text: '收到' }) });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.fallbackFrom, undefined);
+
+  const models = [];
+  const fb = await probeSeat(seat, {
+    findBinFn: has,
+    runFn: async s => (models.push(s.model), s.model ? { text: '', error: "The 'gpt-6.2-sol' model is not supported when using Codex with a ChatGPT account." } : { text: '收到' }),
+  });
+  assert.deepEqual(models, ['gpt-6.2-sol', '']);
+  assert.equal(fb.ok, true);
+  assert.equal(fb.fallbackFrom, 'gpt-6.2-sol');
+
+  let calls = 0;
+  const flaky = await probeSeat(seat, {
+    findBinFn: has,
+    runFn: async () => (++calls === 1 ? { text: '', error: 'backend returned an empty conversation id' } : { text: '收到' }),
+  });
+  assert.equal(calls, 2);
+  assert.equal(flaky.ok, true);
+
+  calls = 0;
+  const login = await probeSeat(seat, { findBinFn: has, runFn: async () => (calls++, { text: '', error: 'Not logged in' }) });
+  assert.equal(calls, 1, '没登录不需要重试');
+  assert.equal(login.kind, 'login');
+
+  const slow = await probeSeat(seat, {
+    findBinFn: has,
+    timeoutMs: 30,
+    runFn: (s, opts) => new Promise(ok => opts.signal.addEventListener('abort', () => ok({ text: '', error: '已停止' }))),
+  });
+  assert.equal(slow.kind, 'timeout');
+});
+
+test('/api/probe：失败的席位默认不参加，模型回退落盘且重启后仍生效', async () => {
+  const tmpData = mkdtempSync(join(tmpdir(), 'rt-probe-test-'));
+  const findBinFn = cmd => (cmd === 'claude' ? null : `/mock/bin/${cmd}`);
+  const runSeatFn = async seat => {
+    if (seat.cli === 'codex' && seat.label.includes('astra')) return { text: '', error: 'unexpected status 401 Unauthorized' };
+    if (seat.cli === 'codex' && seat.model) return { text: '', error: "The 'gpt-6.2-sol' model is not supported when using Codex with a ChatGPT account." };
+    return { text: '收到' };
+  };
+  let srv = await startTestServer({ dataDir: tmpData, findBinFn, runSeatFn });
+  try {
+    let meta = await (await fetch(`${srv.baseUrl}/api/meta`)).json();
+    assert.equal(meta.probe.checked, false, '首次使用还没检查过');
+    assert.equal(meta.seats.astra.setup.name, 'OpenAI Codex CLI');
+
+    const r = await (await fetch(`${srv.baseUrl}/api/probe`, { method: 'POST', body: '{}' })).json();
+    assert.equal(r.seats.opus.available, false);
+    assert.equal(r.seats.opus.probe.kind, 'missing');
+    assert.equal(r.seats.astra.probe.ok, false);
+    assert.equal(r.seats.astra.probe.kind, 'login');
+    assert.equal(r.seats.sol.probe.ok, true);
+    assert.equal(r.seats.sol.probe.fallbackFrom, 'gpt-6.2-sol');
+    assert.equal(r.seats.sol.model, '');
+    assert.equal(r.seats.gemini.probe.ok, true);
+    assert.deepEqual(r.defaults.seats, ['sol', 'gemini', 'carbon']);
+
+    const fbs = JSON.parse(readFileSync(join(tmpData, 'model-fallbacks.json'), 'utf8'));
+    assert.equal(fbs.sol.from, 'gpt-6.2-sol');
+    assert.ok(existsSync(join(tmpData, 'probe.json')));
+
+    const conv = await (await fetch(`${srv.baseUrl}/api/convs`, { method: 'POST', body: '{}' })).json();
+    assert.deepEqual(conv.settings.seats, ['sol', 'gemini', 'carbon']);
+  } finally {
+    await srv.close();
+  }
+
+  // 重启：回退和检查结果都还在
+  srv = await startTestServer({ dataDir: tmpData, findBinFn, runSeatFn: async () => ({ text: '收到' }) });
+  try {
+    let meta = await (await fetch(`${srv.baseUrl}/api/meta`)).json();
+    assert.equal(meta.probe.checked, true);
+    assert.equal(meta.seats.sol.model, '');
+    assert.equal(meta.seats.sol.fallbackFrom, 'gpt-6.2-sol');
+    assert.equal(meta.seats.astra.probe.kind, 'login');
+
+    // 原模型又能用了：重新检查后恢复原模型，回退记录删掉
+    const r = await (await fetch(`${srv.baseUrl}/api/probe`, { method: 'POST', body: '{}' })).json();
+    assert.equal(r.seats.sol.model, 'gpt-6.2-sol');
+    assert.equal(r.seats.sol.fallbackFrom, undefined);
+    assert.equal(r.seats.astra.probe.ok, true);
+    assert.deepEqual(JSON.parse(readFileSync(join(tmpData, 'model-fallbacks.json'), 'utf8')), {});
+  } finally {
+    await srv.close();
+    rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
+test('/api/convs/:id/prepare：根据问题自动生成背景和各席位角色并保存，异常返回不污染原设置', async () => {
+  const tmpData = mkdtempSync(join(tmpdir(), 'rt-prepare-test-'));
+  const findBinFn = cmd => (cmd === 'codex' || cmd === 'agy' ? `/mock/bin/${cmd}` : null);
+  const calls = [];
+  let mode = 'fenced';
+  const sayFn = async (seatId, opts) => {
+    calls.push({ seatId, web: opts.web, effort: opts.effort, prompt: opts.prompt });
+    if (mode === 'bad') return { text: '这不是 JSON 内容', ms: 10, error: null };
+    return {
+      text: '```json\n' + JSON.stringify({
+        background: '目标：评估 6 个月内是否自研推荐系统。\n约束：【待补充：团队人数与预算】',
+        personas: {
+          astra: '负责落地排期与研发成本核算，关注投入产出比',
+          gemini: '唱反调，专挑自研风险、隐性运维成本和失败案例',
+          opus: '这个席位没装，不应该被写入',
+        },
+        missing: ['当前日活规模', '可投入的工程师人数'],
+      }) + '\n```',
+      ms: 25,
+      error: null,
+    };
+  };
+
+  const srv = await startTestServer({ dataDir: tmpData, findBinFn, sayFn });
+  try {
+    const conv = await (await fetch(`${srv.baseUrl}/api/convs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ settings: { seats: ['astra', 'gemini'] } }),
+    })).json();
+
+    // 空文本返回 400
+    const emptyRes = await fetch(`${srv.baseUrl}/api/convs/${conv.id}/prepare`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '   ' }),
+    });
+    assert.equal(emptyRes.status, 400);
+
+    // 正常配局：解析带 markdown 代码块的 JSON，过滤未参加席位，并落盘
+    const res = await fetch(`${srv.baseUrl}/api/convs/${conv.id}/prepare`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '我们要不要自研一套推荐系统？' }),
+    });
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.seat, 'astra');
+    assert.match(data.background, /自研推荐系统/);
+    assert.deepEqual(Object.keys(data.personas).sort(), ['astra', 'gemini']);
+    assert.equal(data.personas.opus, undefined);
+    assert.deepEqual(data.missing, ['当前日活规模', '可投入的工程师人数']);
+    assert.equal(calls[0].web, false);
+    assert.equal(calls[0].effort, 'medium');
+
+    const saved = await (await fetch(`${srv.baseUrl}/api/convs/${conv.id}`)).json();
+    assert.equal(saved.settings.background, data.background);
+    assert.equal(saved.settings.personas.astra, data.personas.astra);
+    assert.equal(saved.settings.personas.gemini, data.personas.gemini);
+    assert.equal(saved.settings.personas.opus, undefined);
+
+    // 返回非 JSON 时报 502，且不破坏已有设置
+    mode = 'bad';
+    const badRes = await fetch(`${srv.baseUrl}/api/convs/${conv.id}/prepare`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '换个问题' }),
+    });
+    assert.equal(badRes.status, 502);
+    const afterBad = await (await fetch(`${srv.baseUrl}/api/convs/${conv.id}`)).json();
+    assert.equal(afterBad.settings.background, data.background);
+  } finally {
+    await srv.close();
     rmSync(tmpData, { recursive: true, force: true });
   }
 });
