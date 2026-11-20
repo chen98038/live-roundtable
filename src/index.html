@@ -193,6 +193,18 @@ body.set-open #more { display: grid; }
 .quick .sep { width: 1px; height: 16px; background: var(--line); margin: 0 2px; }
 .composer .hint { max-width: var(--measure); margin: 6px auto 0; font-size: 12px; color: var(--muted); text-align: right; }
 .composer .hint:empty { display: none; }
+.composer .box.drop { border-color: var(--accent); border-style: dashed; }
+/* 附件：复制粘贴、拖进来或点「附件」，在浏览器里读成文字，跟着这条消息一起发 */
+.atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; }
+.atts:empty { display: none; }
+.att { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; border: 1px solid var(--line); background: var(--soft); border-radius: 8px; padding: 3px 3px 3px 9px; font-size: 13px; }
+.att b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.att span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.att button { border: 0; background: none; color: var(--muted); padding: 0 6px; border-radius: 6px; line-height: 1.5; }
+.att button:hover { color: var(--ink); background: var(--line); }
+details.attx { margin: 8px 0 2px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font: 400 13.5px/1.6 var(--body); }
+details.attx summary { cursor: pointer; padding: 6px 12px; color: var(--muted); }
+details.attx pre { margin: 0; padding: 8px 12px 10px; border-top: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; max-height: 50vh; overflow: auto; font: inherit; }
 
 /* 总结后的快捷追问 */
 .next { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
@@ -414,10 +426,13 @@ body.set-open #more { display: grid; }
     <div class="strip" id="seatstrip" data-settings role="group" aria-label="参加的席位"></div>
     <div class="log" id="log" aria-live="polite"></div>
     <footer class="composer">
-      <div class="box">
+      <div class="box" id="composerBox">
+        <div class="atts" id="atts"></div>
         <textarea id="input" rows="2" placeholder="说点什么。⌘ + Enter 发送"></textarea>
         <div class="bar">
           <div class="quick">
+            <button class="chip" id="attach" title="附加 .md / .txt 这类文本文件。也可以在访达里选中文件按 ⌘C，回到输入框按 ⌘V；或者直接拖进来">附件</button>
+            <input type="file" id="filepick" multiple hidden accept=".md,.markdown,.txt,.text,.csv,.tsv,.json,.yaml,.yml,.html,.htm,.xml,.org,.rst,.tex,.log,text/*">
             <button class="chip prep" id="prepare" title="先让主持人根据你的问题起草背景和各席位角色，填好后可微调再开始圆桌">AI 填背景和角色</button>
             <span class="sep" aria-hidden="true"></span>
             <button class="chip" id="respond" title="每位看完别人刚才的发言后回应">互相回应</button>
@@ -779,8 +794,20 @@ function metaLine(m) {
 const NEXT_RE = /^##\s*(下一层问题|深挖这处分歧)[^\n]*\n[\s\S]*?(?=^##\s|(?![\s\S]))/gm;
 const textOf = m => (m.pending ? raw[m.id] : m.text) ?? '';
 function bodyHTML(m, { trimNext } = {}) {
-  if (m.role === 'user') return esc(m.text).replace(/\n/g, '<br>');
+  if (m.role === 'user') return userHTML(m.text);
   return md(trimNext ? textOf(m).replace(NEXT_RE, '') : textOf(m));
+}
+// 消息里的附件块折叠显示，点开才看全文
+const ATT_RE = /【附件：([^】\n]+)】\n([\s\S]*?)\n【附件结束】/g;
+const plainHTML = t => esc(t.trim()).replace(/\n/g, '<br>');
+function userHTML(t) {
+  let out = '', i = 0;
+  for (const x of t.matchAll(ATT_RE)) {
+    out += plainHTML(t.slice(i, x.index));
+    out += `<details class="attx"><summary>附件 · ${esc(x[1])} · ${x[2].length.toLocaleString()} 字</summary><pre>${esc(x[2])}</pre></details>`;
+    i = x.index + x[0].length;
+  }
+  return out + plainHTML(t.slice(i));
 }
 const copyBtn = m => `<button class="copy" data-copy="${m.id}" title="复制这条发言的原文">复制</button>`;
 const kickHTML = m => `<div class="kick">${esc(label(m))}<span>${esc(when(m.at))}</span></div>`;
@@ -1050,7 +1077,8 @@ function flashPrepFields(personaIds) {
 }
 async function prepareRoundtable() {
   if (busy || prepBusy || !conv) return;
-  const text = $('input').value.trim();
+  const text = composed();
+  if (isBarePath(text)) { attNotice([BARE_PATH_TIP]); $('input').focus(); return; }
   if (!text) {
     $('input').focus();
     notices = ['先在输入框写下你想讨论的问题，再点「AI 填背景和角色」。'];
@@ -1104,12 +1132,17 @@ async function undoPrepare() {
 /* ---------- 发言 ---------- */
 async function turn(mode, preset) {
   if (busy || prepBusy) return;
-  const text = preset ?? $('input').value.trim();
   const typed = mode === 'ask' || mode === 'research' || !!META.special[mode];
+  const text = preset ?? (typed ? composed() : $('input').value.trim());
   if (typed && !text) { $('input').focus(); return; }
+  if (typed && isBarePath(text)) { attNotice([BARE_PATH_TIP]); $('input').focus(); return; }
   await flushSettings();
   if (prepInfo) { prepInfo = null; renderPrep(); }
-  if (!preset && typed) { $('input').value = ''; grow(); }
+  if (!preset && typed) {
+    $('input').value = ''; grow();
+    attachments = []; renderAtts();
+    if (attNotes.length) { notices = notices.filter(n => !attNotes.includes(n)); attNotes = []; }
+  }
   setBusy(true);
   try { await api(`/api/convs/${conv.id}/say`, { method: 'POST', body: { mode, text } }); }
   catch (err) { notices.push(err.message); setBusy(false); }
@@ -1127,6 +1160,95 @@ function setBusy(b) {
   syncButtons();
   if (changed && conv) renderLog();
 }
+/* ---------- 附件 ---------- */
+// 文件只在浏览器里读成文字，服务端不碰本地路径。内容会在每一轮发给每一位，所以限总大小
+const ATT_MAX = 80 * 1024;
+const TEXT_EXT = /\.(md|markdown|txt|text|csv|tsv|json|ya?ml|html?|xml|org|rst|tex|log)$/i;
+let attachments = [];
+const kb = n => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`);
+// 跟服务端 isBarePath 同一套规则：整条消息只是一个本地路径时先拦下，输入框里的字不清掉
+const BARE_PATH_TIP = '圆桌读不到你电脑上的文件。请把内容粘贴进来；或者在访达里选中文件按 ⌘C，回到输入框按 ⌘V（也可以直接拖进来）。';
+function isBarePath(text) {
+  const s = text.replace(/@[a-zA-Z0-9_-]+/g, '').trim();
+  if (!s || s.includes('\n') || !/^(?:file:\/\/|~|[A-Za-z]:)?[\/\\][^\s\/\\]/.test(s)) return false;
+  const ext = /\.[A-Za-z0-9]{1,8}$/.test(s);
+  if ((s.match(/[\/\\]/g) ?? []).length < 2 && !ext) return false;
+  if (!/\s/.test(s)) return true;
+  return ext && !/[？?。，,！!]/.test(s);
+}
+function composed() {
+  const files = attachments.map(a => `【附件：${a.name}】\n${a.text}\n【附件结束】`);
+  return [$('input').value.trim(), ...files].filter(Boolean).join('\n\n');
+}
+function renderAtts() {
+  $('atts').innerHTML = attachments.map(a => `<span class="att" title="${esc(a.name)}"><b>${esc(a.name)}</b><span>${kb(a.size)}</span><button type="button" data-att-del="${esc(a.id)}" aria-label="移除 ${esc(a.name)}">✕</button></span>`).join('');
+}
+// 附件提示只留最新一批，不在记录底部越堆越多
+let attNotes = [];
+function attNotice(lines) {
+  notices = notices.filter(n => !attNotes.includes(n)).concat(lines);
+  attNotes = lines;
+  renderLog(true);
+}
+async function addFiles(list) {
+  const errs = [];
+  for (const f of list) {
+    if (attachments.some(a => a.name === f.name && a.size === f.size)) continue;
+    if (!(f.type.startsWith('text/') || f.type === 'application/json' || TEXT_EXT.test(f.name))) {
+      errs.push(`「${f.name}」不是纯文本文件。目前只支持 .md、.txt 这类文本；PDF、EPUB、Word 请先导出成文字，或把要紧的章节直接粘贴进来。`);
+      continue;
+    }
+    const used = attachments.reduce((s, a) => s + a.size, 0);
+    if (used + f.size > ATT_MAX) {
+      errs.push(`「${f.name}」${kb(f.size)}，附件合计不能超过 ${kb(ATT_MAX)}（内容每一轮都会发给每一位，太长费用和上下文都扛不住）。可以只粘贴要紧的章节。`);
+      continue;
+    }
+    let text;
+    try { text = (await f.text()).replace(/\r\n?/g, '\n').trim(); }
+    catch { errs.push(`读不了「${f.name}」。`); continue; }
+    if (text.includes('\u0000')) { errs.push(`「${f.name}」看起来不是文本文件。`); continue; }
+    if (!text) { errs.push(`「${f.name}」是空的。`); continue; }
+    attachments.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: f.name, size: f.size, text });
+  }
+  renderAtts();
+  if (errs.length) attNotice(errs);
+  $('input').focus();
+}
+// 粘贴：剪贴板里有文件就收成附件；只有一个路径或文件名时，提示怎么把文件本身交过来
+$('input').addEventListener('paste', e => {
+  const files = [...(e.clipboardData?.files ?? [])];
+  if (files.length) { e.preventDefault(); addFiles(files); return; }
+  const t = e.clipboardData?.getData('text/plain')?.trim() ?? '';
+  if (/^(?:file:\/\/|~\/|\/)[^\n]*\.[A-Za-z0-9]{1,8}$/.test(t)) {
+    attNotice(['粘贴的是文件路径，圆桌读不到你电脑上的文件。在访达里选中这个文件按 ⌘C，再回到输入框按 ⌘V；或者直接把文件拖进来。']);
+  } else if (/^[^\n/\\]{1,200}\.(md|markdown|txt|text)$/i.test(t)) {
+    attNotice([`只粘贴到了文件名「${t}」，浏览器没把文件本身交过来。请把文件拖进输入框，或点左下角「附件」选择它。`]);
+  }
+});
+// 拖放：拖到页面任何地方都收，免得浏览器直接打开文件把页面换掉
+{
+  const box = $('composerBox');
+  const hasFiles = e => [...(e.dataTransfer?.types ?? [])].includes('Files');
+  let depth = 0;
+  document.addEventListener('dragenter', e => { if (hasFiles(e)) { depth++; box.classList.add('drop'); } });
+  document.addEventListener('dragleave', e => { if (hasFiles(e) && --depth <= 0) { depth = 0; box.classList.remove('drop'); } });
+  document.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  document.addEventListener('drop', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0; box.classList.remove('drop');
+    addFiles([...e.dataTransfer.files]);
+  });
+}
+$('attach').onclick = () => $('filepick').click();
+$('filepick').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
+$('atts').addEventListener('click', e => {
+  const b = e.target.closest('[data-att-del]');
+  if (!b) return;
+  attachments = attachments.filter(a => a.id !== b.dataset.attDel);
+  renderAtts();
+});
+
 function grow() { const i = $('input'); i.style.height = 'auto'; i.style.height = `${Math.min(i.scrollHeight, innerHeight * .4)}px`; }
 // 找秩 / 三把尺读书：输入框空着时先填入模板，填好再点一次才发出
 function special(kind) {

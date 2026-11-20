@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { classifyError, createSay, loadSeats, probeSeat } from '../src/seats.mjs';
-import { createRoundtableServer } from '../src/server.mjs';
+import { BARE_PATH_ERROR, createRoundtableServer, isBarePath, LEAK_ERROR, MAX_OUT, outputProblem } from '../src/server.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
@@ -482,5 +482,167 @@ test('/api/convs/:id/prepare：根据问题自动生成背景和各席位角色�
   } finally {
     await srv.close();
     rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
+const ok = text => ({ text, ms: 5, usage: null, usd: 0, speed: 'standard', sources: [], searches: [], error: null });
+const LEAK = '<invoke name="Read">\n<parameter name="file_path">/Users/a/book.md</parameter>\n</invoke>\n\n';
+const post = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+test('输出守卫：工具调用写成正文、输出超长就判错；正文里偶尔提到一次不误伤', () => {
+  assert.equal(outputProblem(LEAK), LEAK_ERROR);
+  assert.equal(outputProblem(`我先读一下文件\n${LEAK}${LEAK}${LEAK}`), LEAK_ERROR);
+  assert.equal(outputProblem('Claude 的工具调用长这样：<invoke name="Read">，这里只是举例'), null);
+  assert.match(outputProblem('字'.repeat(MAX_OUT + 1)), /已中止/);
+  assert.equal(outputProblem('正常的发言'), null);
+});
+
+test('整条消息只是本地路径时识别出来，夹在句子里的路径和「/ 这个符号」不算', () => {
+  for (const s of ['/Users/a/clew/feed/babble-and-prune.md', '~/notes/x.md', 'file:///Users/a/b.md', 'C:\\books\\a.txt', '/Users/x/My Books/a.md', '@opus /Users/a/b.md']) {
+    assert.equal(isBarePath(s), true, s);
+  }
+  for (const s of ['/ 这个符号怎么读', '/help', '/usr/bin 是干嘛的', '看看 /Users/a/b.md', '/Users/a/b.md 讲了什么？', '帮我读\n/Users/a/b.md']) {
+    assert.equal(isBarePath(s), false, s);
+  }
+});
+
+test('三把尺读书：主持人列清单时吐工具调用，马上中止、标错，整场停下，流式开始时就带步骤信息', async () => {
+  const tmpData = mkdtempSync(join(tmpdir(), 'rt-leak-test-'));
+  const findBinFn = cmd => (cmd === 'claude' || cmd === 'codex' ? `/mock/bin/${cmd}` : null);
+  const calls = [];
+  let chunks = 0;
+  const sayFn = async (seatId, opts) => {
+    calls.push(opts.system);
+    if (opts.system.includes('只把书的观点列成清单')) {
+      let text = '';
+      while (!opts.signal.aborted && chunks < 1000) {
+        chunks++;
+        text += LEAK;
+        opts.onDelta(LEAK);
+        await new Promise(r => setImmediate(r));
+      }
+      return { ...ok(text), error: opts.signal.aborted ? '已停止' : null };
+    }
+    return ok(`${seatId} 的梳理`);
+  };
+  const srv = await startTestServer({ dataDir: tmpData, findBinFn, sayFn });
+  try {
+    const conv = await (await post(`${srv.baseUrl}/api/convs`, { settings: { seats: ['opus', 'astra'], rounds: 1, autoSummary: true } })).json();
+
+    const events = [];
+    const ac = new AbortController();
+    const sse = await fetch(`${srv.baseUrl}/api/convs/${conv.id}/events`, { signal: ac.signal });
+    const reader = sse.body.getReader();
+    const pump = (async () => {
+      const dec = new TextDecoder();
+      let buf = '';
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value);
+          let i;
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const line = buf.slice(0, i); buf = buf.slice(i + 2);
+            if (line.startsWith('data: ')) events.push(JSON.parse(line.slice(6)));
+          }
+        }
+      } catch {}
+    })();
+
+    const res = await post(`${srv.baseUrl}/api/convs/${conv.id}/say`, { mode: 'book', text: '【书】某本书\n【书里的主要观点】见附件' });
+    assert.equal(res.status, 200);
+    await new Promise(r => setTimeout(r, 50));
+    ac.abort();
+    await pump;
+
+    assert.ok(chunks < 10, `守卫应该在几段之内停下，实际吐了 ${chunks} 段`);
+    assert.equal(calls.length, 1, '清单失败后不应再让各席位作答');
+    const saved = await (await fetch(`${srv.baseUrl}/api/convs/${conv.id}`)).json();
+    const inv = saved.messages.find(m => m.mode === 'inventory');
+    assert.equal(inv.error, LEAK_ERROR);
+    assert.equal(inv.text, '');
+    assert.equal(saved.messages.length, 2);
+
+    const start = events.find(e => e.type === 'start' && e.msg.role === 'moderator');
+    assert.equal(start.msg.mode, 'inventory');
+    assert.equal(start.msg.kind, 'book');
+  } finally {
+    await srv.close();
+    rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
+test('不流式的席位（codex）回了工具调用，结束后也会被标错，并且不进入后面的提示', async () => {
+  const tmpData = mkdtempSync(join(tmpdir(), 'rt-leak2-test-'));
+  const findBinFn = cmd => (cmd === 'claude' || cmd === 'codex' ? `/mock/bin/${cmd}` : null);
+  const prompts = [];
+  const sayFn = async (seatId, opts) => {
+    prompts.push(opts.prompt);
+    if (opts.system.includes('只负责让讨论往深处走')) return ok('【无分歧】都一样。');
+    if (opts.system.includes('中立主持人')) return ok('## 回答\n好。');
+    return ok(seatId === 'astra' ? `${LEAK}${LEAK}${LEAK}` : 'opus 的回答');
+  };
+  const srv = await startTestServer({ dataDir: tmpData, findBinFn, sayFn });
+  try {
+    const conv = await (await post(`${srv.baseUrl}/api/convs`, { settings: { seats: ['opus', 'astra'], rounds: 1, autoSummary: true } })).json();
+    assert.equal((await post(`${srv.baseUrl}/api/convs/${conv.id}/say`, { mode: 'ask', text: '这本书讲了什么' })).status, 200);
+    const saved = await (await fetch(`${srv.baseUrl}/api/convs/${conv.id}`)).json();
+    const astra = saved.messages.find(m => m.seat === 'astra');
+    assert.equal(astra.error, LEAK_ERROR);
+    assert.equal(astra.text, '');
+    assert.ok(prompts.length > 2);
+    for (const p of prompts.slice(2)) assert.doesNotMatch(p, /<invoke/);
+  } finally {
+    await srv.close();
+    rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
+test('/say 和 /prepare 收到整条只是路径的消息直接 400，不调用模型', async () => {
+  const tmpData = mkdtempSync(join(tmpdir(), 'rt-path-test-'));
+  const findBinFn = cmd => (cmd === 'claude' ? '/mock/bin/claude' : null);
+  let called = 0;
+  const sayFn = async () => { called++; return ok('收到'); };
+  const srv = await startTestServer({ dataDir: tmpData, findBinFn, sayFn });
+  try {
+    const conv = await (await post(`${srv.baseUrl}/api/convs`, { settings: { seats: ['opus'], rounds: 0, autoSummary: false } })).json();
+    for (const text of ['/Users/a/clew/feed/babble-and-prune.md', '~/x.md', 'file:///Users/a/b.md', 'C:\\a\\b.txt']) {
+      for (const [path, body] of [['say', { mode: 'book', text }], ['prepare', { text }]]) {
+        const res = await post(`${srv.baseUrl}/api/convs/${conv.id}/${path}`, body);
+        assert.equal(res.status, 400, `${path} ${text}`);
+        assert.equal((await res.json()).error, BARE_PATH_ERROR);
+      }
+    }
+    assert.equal(called, 0);
+    assert.equal((await post(`${srv.baseUrl}/api/convs/${conv.id}/say`, { mode: 'ask', text: '/ 这个符号怎么读' })).status, 200);
+    assert.ok(called > 0);
+  } finally {
+    await srv.close();
+    rmSync(tmpData, { recursive: true, force: true });
+  }
+});
+
+test('Claude 席位的系统提示里写明没有工具、拿到路径要直说读不到', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-fakeclaude-'));
+  try {
+    const bin = join(dir, 'claude');
+    writeFileSync(bin, `#!/usr/bin/env node
+const a = process.argv.slice(2);
+process.stdin.resume();
+process.stdin.on('end', () => console.log(JSON.stringify({ type: 'result', subtype: 'success', result: a[a.indexOf('--system-prompt') + 1], usage: {} })));
+`);
+    chmodSync(bin, 0o755);
+    const say = createSay({ findBinFn: cmd => (cmd === 'claude' ? bin : null) });
+    for (const web of [false, true]) {
+      const r = await say('opus', { system: '原来的设定', prompt: '你好', web, fast: false });
+      assert.equal(r.error, null);
+      assert.match(r.text, /^原来的设定\n\n/);
+      assert.match(r.text, /没有读文件/);
+      assert.match(r.text, /不要输出 <invoke>/);
+      assert.match(r.text, /读不到/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

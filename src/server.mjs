@@ -13,6 +13,31 @@ const REPO_ROOT = join(HERE, '..');
 
 const bytes = s => Buffer.byteLength(s);
 const GEMINI_MAX = 170_000;
+
+// 输出守卫：席位在这里没有工具，模型却把工具调用写成正文（多半是拿到路径想去读文件），
+// 或者输出失控一直不停，就提前停下，免得空耗额度、把垃圾带进后面的讨论
+const LEAK_HEAD = /^\s*<(?:antml:)?(?:invoke|function_calls)\b/;
+const LEAK_ANY = /<(?:antml:)?(?:invoke name=|function_calls>)/g;
+export const MAX_OUT = 30_000;
+export const LEAK_ERROR = '模型把工具调用当正文输出了（这里没有读文件、跑命令的工具），已中止。如果你给的是文件路径，请把内容粘贴进来，或用「附件」把文件加进来';
+export function outputProblem(t = '') {
+  if (LEAK_HEAD.test(t) || (t.match(LEAK_ANY)?.length ?? 0) >= 3) return LEAK_ERROR;
+  if (t.length > MAX_OUT) return `输出超过 ${MAX_OUT.toLocaleString()} 字还没结束，已中止`;
+  return null;
+}
+
+// 整条消息只是一个本地路径：圆桌读不到，直接拦下并告诉提问人怎么办
+export const BARE_PATH_ERROR = '圆桌读不到你电脑上的文件。请把内容粘贴进来；或者在访达里选中文件按 ⌘C，回到输入框按 ⌘V（也可以直接拖进来）';
+export function isBarePath(text = '') {
+  const s = text.replace(/@[a-zA-Z0-9_-]+/g, '').trim();
+  if (!s || s.includes('\n') || !/^(?:file:\/\/|~|[A-Za-z]:)?[\/\\][^\s\/\\]/.test(s)) return false;
+  const ext = /\.[A-Za-z0-9]{1,8}$/.test(s);
+  // 「/help」这种只有一段、又没有扩展名的不算路径
+  if ((s.match(/[\/\\]/g) ?? []).length < 2 && !ext) return false;
+  if (!/\s/.test(s)) return true;
+  // 带空格的只认以扩展名结尾、又不像一句话的，例如 /Users/x/My Books/a.md
+  return ext && !/[？?。，,！!]/.test(s);
+}
 // 随项目分发的字体（子集化 woff2，见 vendor/fonts/README.md），只放行这两个文件
 const FONTS = new Set(['/vendor/fonts/Montserrat-subset.woff2', '/vendor/fonts/NotoSansSC-subset.woff2']);
 
@@ -358,12 +383,18 @@ export function createRoundtableServer(options = {}) {
         emit({ type: 'done', msg: m });
         return m;
       }
-      const m = { id: randomUUID(), role, seat: seatId, text: '', at: new Date().toISOString(), pending: true };
+      // 一开始就带上步骤信息，页面流式显示时才能标对是「清单」「定焦」还是哪一轮
+      const m = {
+        id: randomUUID(), role, seat: seatId, text: '', at: new Date().toISOString(), pending: true, mode,
+        ...(round && { round }),
+        ...((mode === 'inventory' || mode.startsWith('special-')) && { kind: kindOf(c) }),
+      };
       emit({ type: 'start', msg: m });
       // 主持人（定焦、清单、总结）可以单独指定思考强度；留空则跟随这位席位自己的设置
       const effort = (role !== 'seat' && c.settings.moderatorEffort)
         || c.settings.efforts?.[seatId] || c.settings.effort || 'high';
       const ac = new AbortController();
+      let seen = '', tripped = null;
       const stopAll = () => ac.abort();
       signal.addEventListener('abort', stopAll, { once: true });
       if (role === 'seat') {
@@ -377,14 +408,20 @@ export function createRoundtableServer(options = {}) {
         effort,
         fast: c.settings.fast,
         signal: ac.signal,
-        onDelta: t => emit({ type: 'delta', id: m.id, text: t }),
+        onDelta: t => {
+          seen += t;
+          if (!tripped && (tripped = outputProblem(seen))) ac.abort();
+          emit({ type: 'delta', id: m.id, text: t });
+        },
         onStatus: s => emit({ type: 'status', id: m.id, text: s }),
       });
       signal.removeEventListener('abort', stopAll);
       if (role === 'seat') seatRuns.get(c.id)?.delete(seatId);
-      const dropped = ac.signal.aborted && !signal.aborted;
+      // codex 不流式，结束后再查一遍
+      if (!tripped && !signal.aborted) tripped = outputProblem(r.text ?? '');
+      const dropped = !tripped && ac.signal.aborted && !signal.aborted;
       Object.assign(m, {
-        text: dropped ? '' : r.text,
+        text: dropped || tripped ? '' : r.text,
         effort,
         ...(round && { round }),
         ms: r.ms,
@@ -393,7 +430,7 @@ export function createRoundtableServer(options = {}) {
         speed: r.speed,
         sources: r.sources,
         searches: r.searches,
-        error: dropped ? '中途取消了这位' : r.error,
+        error: tripped ?? (dropped ? '中途取消了这位' : r.error),
         pending: false,
         mode,
         ...((mode === 'inventory' || mode.startsWith('special-')) && { kind: kindOf(c) }),
@@ -532,9 +569,10 @@ export function createRoundtableServer(options = {}) {
       } else if (mode === 'summary') {
         await runTurn(c, { mode: kindOf(c) ? 'special-summary' : 'summary', seats: pick(), emit, signal: ac.signal });
       } else if (SPECIAL[mode]) {
-        await runTurn(c, { mode: 'inventory', seats: pick(), emit, signal: ac.signal });
-        if (!ac.signal.aborted) await runTurn(c, { mode: 'special-ask', seats: pick(), emit, signal: ac.signal });
-        if (pick().length > 1) {
+        const [inv] = await runTurn(c, { mode: 'inventory', seats: pick(), emit, signal: ac.signal });
+        // 清单没出来，后面「清单见主持人那条」就没有依据，整场停下
+        if (!ac.signal.aborted && !inv?.error) await runTurn(c, { mode: 'special-ask', seats: pick(), emit, signal: ac.signal });
+        if (!ac.signal.aborted && !inv?.error && pick().length > 1) {
           const totalRounds = c.settings.rounds ?? defs.rounds;
           for (let round = 1; round <= totalRounds && !ac.signal.aborted && pick().length > 1; round++) {
             if (!(await discuss(c, { seats: pick, emit, signal: ac.signal, round }))) break;
@@ -668,6 +706,7 @@ export function createRoundtableServer(options = {}) {
         const mode = b.mode ?? 'ask';
         const text = (b.text ?? '').trim();
         if ((mode === 'ask' || mode === 'research' || SPECIAL[mode]) && !text) return send(400, { error: '先写点什么' });
+        if (isBarePath(text)) return send(400, { error: BARE_PATH_ERROR });
         const r = await turn(c, { mode, text, role: 'user' });
         return send(r.error ? 409 : 200, r);
       }
@@ -675,6 +714,7 @@ export function createRoundtableServer(options = {}) {
         const b = await readBody(req);
         const text = (b.text ?? '').trim();
         if (!text) return send(400, { error: '先写下你想讨论的问题' });
+        if (isBarePath(text)) return send(400, { error: BARE_PATH_ERROR });
         if (running.has(c.id)) return send(409, { error: '这场讨论正在进行一轮，等它结束再配局' });
         const inspected = inspect();
         const modSeat = moderatorOf(c, inspected);
@@ -688,6 +728,7 @@ export function createRoundtableServer(options = {}) {
         const ac = new AbortController();
         const onClose = () => { if (!res.writableEnded) ac.abort(); };
         res.on('close', onClose);
+        let seen = '', bad = null;
         const r = await say(modSeat, {
           system: PREPARE_SYS,
           prompt: preparePrompt(c, text, targetSeats, loadedSeats),
@@ -695,8 +736,11 @@ export function createRoundtableServer(options = {}) {
           effort: 'medium',
           fast: c.settings.fast,
           signal: ac.signal,
+          onDelta: t => { seen += t; if (!bad && (bad = outputProblem(seen))) ac.abort(); },
         });
         res.off('close', onClose);
+        bad ??= ac.signal.aborted ? null : outputProblem(r.text ?? '');
+        if (bad) return send(502, { error: bad });
         if (ac.signal.aborted) return;
         if (r.error) return send(502, { error: r.error });
 

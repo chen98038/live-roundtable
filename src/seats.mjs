@@ -322,7 +322,11 @@ function spawnCli(bin, args, opts) {
   return spawn(bin, args, opts);
 }
 
-const NO_TOOLS = '不要使用任何工具，也不要读写文件，直接用文字回答。';
+const NO_TOOLS = '不要使用任何工具，也不要读写文件，直接用文字回答。提问人只给了文件路径而没贴内容时，直接说读不到，请他把内容贴进来。';
+// Claude 席位用 --tools "" 关掉了工具，但模型不知道；拿到路径时它可能把工具调用写成正文，所以在系统提示里讲明
+const claudeNoTools = web => web
+  ? '除了上网搜索，你在这里没有读文件、运行命令的工具，不要输出 <invoke> 之类的工具调用标记。提问人只给了本地文件路径而没贴内容时，直接说读不到，请他把内容贴进来或用「附件」加进来。'
+  : '你在这里没有读文件、上网、运行命令的工具，不要输出 <invoke> 之类的工具调用标记。提问人只给了文件路径或链接而没贴内容时，直接说读不到，请他把内容贴进来或用「附件」加进来。';
 
 function claudeOnce(bin, seat, { system, prompt, web = false, effort = 'high', fast = true, signal, onDelta = () => {}, onStatus = () => {} }) {
   return new Promise(ok => {
@@ -335,7 +339,7 @@ function claudeOnce(bin, seat, { system, prompt, web = false, effort = 'high', f
       '--effort', effort,
       '--tools', tools, ...(web ? ['--allowedTools', tools] : []),
       '--no-session-persistence', '--permission-mode', 'dontAsk', '--safe-mode',
-      '--system-prompt', system,
+      '--system-prompt', `${system}\n\n${claudeNoTools(web)}`,
       ...(fast ? ['--settings', '{"fastMode":true}'] : []),
     ];
     const p = spawnCli(bin, args, { cwd: getEmptyDir(), stdio: ['pipe', 'pipe', 'pipe'] });
