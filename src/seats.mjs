@@ -46,8 +46,8 @@ export const DEFAULT_SEATS = {
   gemini: {
     vendor: 'google',
     cli: 'agy',
-    model: 'gemini-4-argon',
-    label: 'Gemini 4 Argon',
+    model: 'gemini-4-neon',
+    label: 'Gemini 4 Neon',
     defaultEffort: 'high',
     color: '#6d4bd8',
     darkColor: '#a993f5',

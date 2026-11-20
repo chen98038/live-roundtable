@@ -14,7 +14,7 @@
 2. 本机已安装并登录以下任意 1 个或多个 CLI 工具（装了几个就会启用几个席位，未安装的席位会在页面的设置里自动置灰）：
    - `claude`（Claude Code CLI，对应 Opus / Fable）
    - `codex`（OpenAI Codex CLI，对应 GPT-6.2 astra / sol；需要 codex 0.169 及以上）
-   - `agy`（Antigravity CLI，对应 Gemini 4 Argon / Carbon）
+   - `agy`（Antigravity CLI，对应 Gemini 4 Neon / Carbon）
 
 注意：这里用的是**命令行工具**，不是 ChatGPT / Gemini 的网页或 App。有账号还需要装好对应的命令行并登录一次。
 
